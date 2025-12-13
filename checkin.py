@@ -8,14 +8,62 @@ import json
 import os
 import sys
 from datetime import datetime
+from typing import TypedDict
 
 import httpx
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
+from playwright.async_api import Browser, async_playwright
 
 from notify import notify
 
 load_dotenv()
+
+# ============ 配置常量 ============
+ANYROUTER_BASE_URL = 'https://anyrouter.top'
+WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
+DEFAULT_TIMEOUT = 30.0
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.0
+
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+
+
+# ============ 类型定义 ============
+class AccountConfig(TypedDict):
+	cookies: str | dict[str, str]
+	api_user: str
+
+
+class CheckinResult(TypedDict):
+	success: bool
+	account_index: int
+	user_info: str | None
+	error: str | None
+
+
+# ============ 工具函数 ============
+def mask_sensitive(value: str, visible_chars: int = 4) -> str:
+	"""脱敏敏感信息，保留首尾字符"""
+	if not value:
+		return '***'
+	if len(value) <= visible_chars * 2:
+		return '*' * len(value)
+	return value[:visible_chars] + '*' * (len(value) - visible_chars * 2) + value[-visible_chars:]
+
+
+async def retry_async(coro_func, max_retries: int = MAX_RETRIES, base_delay: float = RETRY_BASE_DELAY):
+	"""异步重试装饰器，支持指数退避"""
+	last_exception = None
+	for attempt in range(max_retries):
+		try:
+			return await coro_func()
+		except (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout) as e:
+			last_exception = e
+			if attempt < max_retries - 1:
+				delay = base_delay * (2 ** attempt)
+				print(f'[RETRY] Attempt {attempt + 1} failed, retrying in {delay}s...')
+				await asyncio.sleep(delay)
+	raise last_exception
 
 
 def load_accounts():
@@ -63,16 +111,59 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-async def get_waf_cookies_with_playwright(account_name: str):
-	"""使用 Playwright 获取 WAF cookies（隐私模式）"""
-	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
+async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[str, str] | None:
+	"""使用已有浏览器实例获取单个账号的 WAF cookies"""
+	context = await browser.new_context(
+		user_agent=DEFAULT_USER_AGENT,
+		viewport={'width': 1920, 'height': 1080},
+	)
+
+	page = await context.new_page()
+
+	try:
+		print(f'[PROCESSING] {account_name}: Accessing login page to get WAF cookies...')
+
+		await page.goto(f'{ANYROUTER_BASE_URL}/login', wait_until='networkidle', timeout=DEFAULT_TIMEOUT * 1000)
+
+		try:
+			await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+		except Exception:
+			await page.wait_for_timeout(3000)
+
+		cookies = await page.context.cookies()
+
+		waf_cookies = {}
+		for cookie in cookies:
+			if cookie['name'] in WAF_COOKIE_NAMES:
+				waf_cookies[cookie['name']] = cookie['value']
+
+		print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies')
+
+		missing_cookies = [c for c in WAF_COOKIE_NAMES if c not in waf_cookies]
+
+		if missing_cookies:
+			print(f'[FAILED] {account_name}: Missing WAF cookies: {missing_cookies}')
+			return None
+
+		print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
+		return waf_cookies
+
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Error getting WAF cookies: {str(e)[:100]}')
+		return None
+	finally:
+		await context.close()
+
+
+async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]:
+	"""批量获取所有账号的 WAF cookies，复用单个浏览器实例"""
+	print(f'[SYSTEM] Starting browser to get WAF cookies for {account_count} accounts...')
+
+	waf_cookies_list: list[dict[str, str] | None] = []
 
 	async with async_playwright() as p:
-		context = await p.chromium.launch_persistent_context(
-			user_data_dir=None,
+		browser = await p.chromium.launch(
 			headless=False,
-			user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-			viewport={'width': 1920, 'height': 1080},
 			args=[
 				'--disable-blink-features=AutomationControlled',
 				'--disable-dev-shm-usage',
@@ -82,51 +173,34 @@ async def get_waf_cookies_with_playwright(account_name: str):
 			],
 		)
 
-		page = await context.new_page()
-
 		try:
-			print(f'[PROCESSING] {account_name}: Step 1: Access login page to get initial cookies...')
+			for i in range(account_count):
+				account_name = f'Account {i + 1}'
 
-			await page.goto('https://anyrouter.top/login', wait_until='networkidle')
+				# 带重试的 WAF cookies 获取
+				waf_cookies = None
+				for attempt in range(MAX_RETRIES):
+					waf_cookies = await get_single_waf_cookies(browser, account_name)
+					if waf_cookies:
+						break
+					if attempt < MAX_RETRIES - 1:
+						delay = RETRY_BASE_DELAY * (2 ** attempt)
+						print(f'[RETRY] {account_name}: Retrying WAF cookies in {delay}s...')
+						await asyncio.sleep(delay)
 
-			try:
-				await page.wait_for_function('document.readyState === "complete"', timeout=5000)
-			except Exception:
-				await page.wait_for_timeout(3000)
+				waf_cookies_list.append(waf_cookies)
 
-			cookies = await page.context.cookies()
+		finally:
+			await browser.close()
 
-			waf_cookies = {}
-			for cookie in cookies:
-				if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
-					waf_cookies[cookie['name']] = cookie['value']
-
-			print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies after step 1')
-
-			required_cookies = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
-			missing_cookies = [c for c in required_cookies if c not in waf_cookies]
-
-			if missing_cookies:
-				print(f'[FAILED] {account_name}: Missing WAF cookies: {missing_cookies}')
-				await context.close()
-				return None
-
-			print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
-
-			await context.close()
-
-			return waf_cookies
-
-		except Exception as e:
-			print(f'[FAILED] {account_name}: Error occurred while getting WAF cookies: {e}')
-			await context.close()
-			return None
+	print(f'[SYSTEM] Browser closed. Got WAF cookies for {sum(1 for c in waf_cookies_list if c)} accounts')
+	return waf_cookies_list
 
 
-def get_user_info(client, headers):
-	"""获取用户信息"""
+async def get_user_info(client: httpx.AsyncClient, headers: dict[str, str], account_name: str) -> str | None:
+	"""异步获取用户信息"""
 	try:
-		response = client.get('https://anyrouter.top/api/user/self', headers=headers, timeout=30)
+		response = await client.get(f'{ANYROUTER_BASE_URL}/api/user/self', headers=headers, timeout=DEFAULT_TIMEOUT)
 
 		if response.status_code == 200:
 			data = response.json()
@@ -136,12 +210,64 @@ def get_user_info(client, headers):
 				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
 				return f':money: Current balance: ${quota}, Used: ${used_quota}'
 	except Exception as e:
-		return f'[FAIL] Failed to get user info: {str(e)[:50]}...'
+		print(f'[WARN] {account_name}: Failed to get user info: {str(e)[:50]}')
 	return None
 
 
-async def check_in_account(account_info, account_index):
-	"""为单个账号执行签到操作"""
+def build_headers(api_user: str) -> dict[str, str]:
+	"""构建请求头"""
+	return {
+		'User-Agent': DEFAULT_USER_AGENT,
+		'Accept': 'application/json, text/plain, */*',
+		'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+		'Accept-Encoding': 'gzip, deflate, br, zstd',
+		'Referer': f'{ANYROUTER_BASE_URL}/console',
+		'Origin': ANYROUTER_BASE_URL,
+		'Connection': 'keep-alive',
+		'Sec-Fetch-Dest': 'empty',
+		'Sec-Fetch-Mode': 'cors',
+		'Sec-Fetch-Site': 'same-origin',
+		'new-api-user': api_user,
+	}
+
+
+async def do_checkin_request(client: httpx.AsyncClient, headers: dict[str, str], account_name: str) -> tuple[bool, str | None]:
+	"""执行签到请求（带重试）"""
+	checkin_headers = headers.copy()
+	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
+
+	async def _request():
+		return await client.post(f'{ANYROUTER_BASE_URL}/api/user/sign_in', headers=checkin_headers, timeout=DEFAULT_TIMEOUT)
+
+	try:
+		response = await retry_async(_request)
+		print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
+
+		if response.status_code == 200:
+			try:
+				result = response.json()
+				if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
+					return True, None
+				else:
+					error_msg = result.get('msg', result.get('message', 'Unknown error'))
+					return False, error_msg
+			except json.JSONDecodeError:
+				if 'success' in response.text.lower():
+					return True, None
+				return False, 'Invalid response format'
+		else:
+			return False, f'HTTP {response.status_code}'
+	except Exception as e:
+		return False, str(e)[:100]
+
+
+async def check_in_account(
+	client: httpx.AsyncClient,
+	account_info: AccountConfig,
+	account_index: int,
+	waf_cookies: dict[str, str] | None
+) -> CheckinResult:
+	"""为单个账号执行签到操作（使用预获取的 WAF cookies）"""
 	account_name = f'Account {account_index + 1}'
 	print(f'\n[PROCESSING] Starting to process {account_name}')
 
@@ -151,91 +277,55 @@ async def check_in_account(account_info, account_index):
 
 	if not api_user:
 		print(f'[FAILED] {account_name}: API user identifier not found')
-		return False, None
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Missing api_user')
+
+	# 日志脱敏
+	print(f'[INFO] {account_name}: API user: {mask_sensitive(api_user)}')
 
 	# 解析用户 cookies
 	user_cookies = parse_cookies(cookies_data)
 	if not user_cookies:
 		print(f'[FAILED] {account_name}: Invalid configuration format')
-		return False, None
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Invalid cookies')
 
-	# 步骤1：获取 WAF cookies
-	waf_cookies = await get_waf_cookies_with_playwright(account_name)
+	# 检查 WAF cookies
 	if not waf_cookies:
-		print(f'[FAILED] {account_name}: Unable to get WAF cookies')
-		return False, None
+		print(f'[FAILED] {account_name}: WAF cookies not available')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='WAF cookies failed')
 
-	# 步骤2：使用 httpx 进行 API 请求
-	client = httpx.Client(http2=True, timeout=30.0)
+	# 合并 cookies
+	all_cookies = {**waf_cookies, **user_cookies}
 
-	try:
-		# 合并 WAF cookies 和用户 cookies
-		all_cookies = {**waf_cookies, **user_cookies}
-		client.cookies.update(all_cookies)
+	# 构建请求头
+	headers = build_headers(api_user)
 
-		headers = {
-			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-			'Accept': 'application/json, text/plain, */*',
-			'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-			'Accept-Encoding': 'gzip, deflate, br, zstd',
-			'Referer': 'https://anyrouter.top/console',
-			'Origin': 'https://anyrouter.top',
-			'Connection': 'keep-alive',
-			'Sec-Fetch-Dest': 'empty',
-			'Sec-Fetch-Mode': 'cors',
-			'Sec-Fetch-Site': 'same-origin',
-			'new-api-user': api_user,
-		}
+	# 设置 cookies
+	for name, value in all_cookies.items():
+		client.cookies.set(name, value, domain='anyrouter.top')
 
-		user_info_text = None
+	# 获取用户信息
+	user_info = await get_user_info(client, headers, account_name)
+	if user_info:
+		print(f'[INFO] {account_name}: {user_info}')
 
-		user_info = get_user_info(client, headers)
-		if user_info:
-			print(user_info)
-			user_info_text = user_info
+	# 执行签到
+	print(f'[NETWORK] {account_name}: Executing check-in')
+	success, error = await do_checkin_request(client, headers, account_name)
 
-		print(f'[NETWORK] {account_name}: Executing check-in')
+	if success:
+		print(f'[SUCCESS] {account_name}: Check-in successful!')
+	else:
+		print(f'[FAILED] {account_name}: Check-in failed - {error}')
 
-		# 更新签到请求头
-		checkin_headers = headers.copy()
-		checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
+	# 清除 cookies 以便下一个账号使用
+	client.cookies.clear()
 
-		response = client.post('https://anyrouter.top/api/user/sign_in', headers=checkin_headers, timeout=30)
-
-		print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
-
-		if response.status_code == 200:
-			try:
-				result = response.json()
-				if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
-					print(f'[SUCCESS] {account_name}: Check-in successful!')
-					return True, user_info_text
-				else:
-					error_msg = result.get('msg', result.get('message', 'Unknown error'))
-					print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
-					return False, user_info_text
-			except json.JSONDecodeError:
-				# 如果不是 JSON 响应，检查是否包含成功标识
-				if 'success' in response.text.lower():
-					print(f'[SUCCESS] {account_name}: Check-in successful!')
-					return True, user_info_text
-				else:
-					print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
-					return False, user_info_text
-		else:
-			print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
-			return False, user_info_text
-
-	except Exception as e:
-		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
-		return False, user_info_text
-	finally:
-		client.close()
+	return CheckinResult(success=success, account_index=account_index, user_info=user_info, error=error if not success else None)
 
 
 async def main():
 	"""主函数"""
-	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started (using Playwright)')
+	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started (optimized version)')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	# 加载账号配置
@@ -244,27 +334,41 @@ async def main():
 		print('[FAILED] Unable to load account configuration, program exits')
 		sys.exit(1)
 
-	print(f'[INFO] Found {len(accounts)} account configurations')
-
-	# 为每个账号执行签到
-	success_count = 0
 	total_count = len(accounts)
+	print(f'[INFO] Found {total_count} account configurations')
+
+	# 步骤1：批量获取所有账号的 WAF cookies（复用浏览器）
+	waf_cookies_list = await get_all_waf_cookies(total_count)
+
+	# 步骤2：使用异步 httpx 客户端并发执行签到
+	results: list[CheckinResult] = []
+
+	async with httpx.AsyncClient(http2=True, timeout=DEFAULT_TIMEOUT) as client:
+		# 并发执行所有账号的签到
+		tasks = [
+			check_in_account(client, account, i, waf_cookies_list[i])
+			for i, account in enumerate(accounts)
+		]
+		results = await asyncio.gather(*tasks, return_exceptions=True)
+
+	# 处理结果
+	success_count = 0
 	notification_content = []
 
-	for i, account in enumerate(accounts):
-		try:
-			success, user_info = await check_in_account(account, i)
-			if success:
+	for i, result in enumerate(results):
+		if isinstance(result, Exception):
+			print(f'[FAILED] Account {i + 1} processing exception: {result}')
+			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(result)[:50]}...')
+		else:
+			if result['success']:
 				success_count += 1
-			# 收集通知内容
-			status = '[SUCCESS]' if success else '[FAIL]'
+			status = '[SUCCESS]' if result['success'] else '[FAIL]'
 			account_result = f'{status} Account {i + 1}'
-			if user_info:
-				account_result += f'\n{user_info}'
+			if result['user_info']:
+				account_result += f'\n{result["user_info"]}'
+			if result['error']:
+				account_result += f'\nError: {result["error"]}'
 			notification_content.append(account_result)
-		except Exception as e:
-			print(f'[FAILED] Account {i + 1} processing exception: {e}')
-			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(e)[:50]}...')
 
 	# 构建通知内容
 	summary = [
