@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import TypedDict
 
 import httpx
@@ -20,6 +20,7 @@ load_dotenv()
 
 # ============ 配置常量 ============
 ANYROUTER_BASE_URL = 'https://anyrouter.top'
+BEIJING_TZ = timezone(timedelta(hours=8))  # 北京时区 UTC+8
 WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
@@ -49,6 +50,11 @@ class CheckinResult(TypedDict):
 
 
 # ============ 工具函数 ============
+def get_beijing_time() -> str:
+	"""获取北京时间字符串"""
+	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def mask_sensitive(value: str, visible_chars: int = 4) -> str:
 	"""脱敏敏感信息，保留首尾字符"""
 	if not value:
@@ -378,7 +384,7 @@ async def check_in_account(
 async def main():
 	"""主函数"""
 	print('[系统] AnyRouter.top 多账号自动签到脚本启动（优化版）')
-	print(f'[时间] 执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+	print(f'[时间] 执行时间: {get_beijing_time()} (北京时间)')
 
 	# 加载账号配置
 	accounts = load_accounts()
@@ -459,7 +465,7 @@ async def main():
 		summary.append('--- 余额变化 ---')
 		summary.extend(balance_changes)
 
-	time_info = f'执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+	time_info = f'执行时间: {get_beijing_time()} (北京时间)'
 
 	notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 
