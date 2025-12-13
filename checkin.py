@@ -216,10 +216,10 @@ async def get_user_info(client: httpx.AsyncClient, headers: dict[str, str], acco
 				quota = round(user_data.get('quota', 0) / 500000, 2)
 				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
 				balance_info = BalanceInfo(quota=quota, used_quota=used_quota)
-				info_str = f'Balance: ${quota}, Used: ${used_quota}'
+				info_str = f'余额: ${quota}, 已用: ${used_quota}'
 				return balance_info, info_str
 	except Exception as e:
-		print(f'[WARN] {account_name}: Failed to get user info: {str(e)[:50]}')
+		print(f'[警告] {account_name}: 获取用户信息失败: {str(e)[:50]}')
 	return None, None
 
 
@@ -277,30 +277,30 @@ async def check_in_account(
 	waf_cookies: dict[str, str] | None
 ) -> CheckinResult:
 	"""为单个账号执行签到操作（使用预获取的 WAF cookies）"""
-	account_name = f'Account {account_index + 1}'
-	print(f'\n[PROCESSING] Starting to process {account_name}')
+	account_name = f'账号 {account_index + 1}'
+	print(f'\n[处理中] 开始处理 {account_name}')
 
 	# 解析账号配置
 	cookies_data = account_info.get('cookies', {})
 	api_user = account_info.get('api_user', '')
 
 	if not api_user:
-		print(f'[FAILED] {account_name}: API user identifier not found')
-		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Missing api_user', balance_before=None, balance_after=None)
+		print(f'[失败] {account_name}: 未找到 API user 标识')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='缺少 api_user', balance_before=None, balance_after=None)
 
 	# 日志脱敏
-	print(f'[INFO] {account_name}: API user: {mask_sensitive(api_user)}')
+	print(f'[信息] {account_name}: API user: {mask_sensitive(api_user)}')
 
 	# 解析用户 cookies
 	user_cookies = parse_cookies(cookies_data)
 	if not user_cookies:
-		print(f'[FAILED] {account_name}: Invalid configuration format')
-		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Invalid cookies', balance_before=None, balance_after=None)
+		print(f'[失败] {account_name}: 配置格式无效')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='cookies 格式无效', balance_before=None, balance_after=None)
 
 	# 检查 WAF cookies
 	if not waf_cookies:
-		print(f'[FAILED] {account_name}: WAF cookies not available')
-		return CheckinResult(success=False, account_index=account_index, user_info=None, error='WAF cookies failed', balance_before=None, balance_after=None)
+		print(f'[失败] {account_name}: WAF cookies 获取失败')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='WAF cookies 获取失败', balance_before=None, balance_after=None)
 
 	# 合并 cookies
 	all_cookies = {**waf_cookies, **user_cookies}
@@ -315,39 +315,61 @@ async def check_in_account(
 	# 获取签到前的余额
 	balance_before, info_before = await get_user_info(client, headers, account_name)
 	if info_before:
-		print(f'[INFO] {account_name}: Before check-in - {info_before}')
+		print(f'[信息] {account_name}: 签到前 - {info_before}')
 
-	# 执行签到
-	print(f'[NETWORK] {account_name}: Executing check-in')
-	success, error = await do_checkin_request(client, headers, account_name)
-
-	if success:
-		print(f'[SUCCESS] {account_name}: Check-in successful!')
-	else:
-		print(f'[FAILED] {account_name}: Check-in failed - {error}')
+	# 执行签到请求
+	print(f'[网络] {account_name}: 执行签到请求')
+	api_success, api_error = await do_checkin_request(client, headers, account_name)
 
 	# 获取签到后的余额
 	balance_after, info_after = await get_user_info(client, headers, account_name)
 	if info_after:
-		print(f'[INFO] {account_name}: After check-in - {info_after}')
+		print(f'[信息] {account_name}: 签到后 - {info_after}')
 
-	# 计算余额变化
+	# 计算余额变化，判断签到是否真正成功
+	# 只有余额增加才算签到成功（每天只能签到一次）
 	user_info = info_after or info_before
+	quota_change = 0.0
+	actual_success = False
+	error_msg = None
+
 	if balance_before and balance_after:
-		quota_change = balance_after['quota'] - balance_before['quota']
-		if quota_change != 0:
-			change_str = f'+${quota_change}' if quota_change > 0 else f'-${abs(quota_change)}'
-			print(f'[BALANCE] {account_name}: Balance changed: {change_str}')
-			user_info = f"{info_after} (Change: {change_str})"
+		quota_change = round(balance_after['quota'] - balance_before['quota'], 2)
+		if quota_change > 0:
+			# 余额增加，签到成功
+			actual_success = True
+			change_str = f'+${quota_change}'
+			print(f'[成功] {account_name}: 签到成功！余额变化: {change_str}')
+			user_info = f"{info_after} (变化: {change_str})"
+		elif api_success:
+			# API 返回成功但余额没变，说明今天已经签到过了
+			actual_success = False
+			error_msg = '今日已签到'
+			print(f'[跳过] {account_name}: 今日已签到，余额无变化')
+			user_info = f"{info_after} (今日已签到)"
+		else:
+			# API 返回失败
+			actual_success = False
+			error_msg = api_error
+			print(f'[失败] {account_name}: 签到失败 - {api_error}')
+	elif api_success:
+		# 无法获取余额信息，但 API 返回成功
+		actual_success = True
+		print(f'[成功] {account_name}: API 返回签到成功（无法验证余额）')
+	else:
+		# API 返回失败
+		actual_success = False
+		error_msg = api_error
+		print(f'[失败] {account_name}: 签到失败 - {api_error}')
 
 	# 清除 cookies 以便下一个账号使用
 	client.cookies.clear()
 
 	return CheckinResult(
-		success=success,
+		success=actual_success,
 		account_index=account_index,
 		user_info=user_info,
-		error=error if not success else None,
+		error=error_msg,
 		balance_before=balance_before,
 		balance_after=balance_after
 	)
@@ -355,17 +377,17 @@ async def check_in_account(
 
 async def main():
 	"""主函数"""
-	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started (optimized version)')
-	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+	print('[系统] AnyRouter.top 多账号自动签到脚本启动（优化版）')
+	print(f'[时间] 执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	# 加载账号配置
 	accounts = load_accounts()
 	if not accounts:
-		print('[FAILED] Unable to load account configuration, program exits')
+		print('[失败] 无法加载账号配置，程序退出')
 		sys.exit(1)
 
 	total_count = len(accounts)
-	print(f'[INFO] Found {total_count} account configurations')
+	print(f'[信息] 发现 {total_count} 个账号配置')
 
 	# 步骤1：批量获取所有账号的 WAF cookies（复用浏览器）
 	waf_cookies_list = await get_all_waf_cookies(total_count)
@@ -383,61 +405,70 @@ async def main():
 
 	# 处理结果
 	success_count = 0
+	skipped_count = 0
 	notification_content = []
 	balance_changes = []
 
 	for i, result in enumerate(results):
 		if isinstance(result, Exception):
-			print(f'[FAILED] Account {i + 1} processing exception: {result}')
-			notification_content.append(f'[FAIL] Account {i + 1}: Exception - {str(result)[:50]}...')
+			print(f'[失败] 账号 {i + 1} 处理异常: {result}')
+			notification_content.append(f'[失败] 账号 {i + 1}: 异常 - {str(result)[:50]}...')
 		else:
 			if result['success']:
 				success_count += 1
-			status = 'SUCCESS' if result['success'] else 'FAIL'
-			account_result = f'[{status}] Account {i + 1}'
+				status = '成功'
+			elif result['error'] == '今日已签到':
+				skipped_count += 1
+				status = '已签'
+			else:
+				status = '失败'
+
+			account_result = f'[{status}] 账号 {i + 1}'
 			if result['user_info']:
 				account_result += f'\n  {result["user_info"]}'
-			if result['error']:
-				account_result += f'\n  Error: {result["error"]}'
+			if result['error'] and result['error'] != '今日已签到':
+				account_result += f'\n  错误: {result["error"]}'
 			notification_content.append(account_result)
 
 			# 记录余额变化
 			if result['balance_before'] and result['balance_after']:
-				change = result['balance_after']['quota'] - result['balance_before']['quota']
-				if change != 0:
-					change_str = f'+${change}' if change > 0 else f'-${abs(change)}'
-					balance_changes.append(f'Account {i + 1}: {change_str}')
+				change = round(result['balance_after']['quota'] - result['balance_before']['quota'], 2)
+				if change > 0:
+					balance_changes.append(f'账号 {i + 1}: +${change}')
 
 	# 构建通知内容
 	summary = [
-		'--- Check-in Statistics ---',
-		f'Success: {success_count}/{total_count}',
-		f'Failed: {total_count - success_count}/{total_count}',
+		'--- 签到统计 ---',
+		f'签到成功: {success_count}/{total_count}',
+		f'今日已签: {skipped_count}/{total_count}',
+		f'签到失败: {total_count - success_count - skipped_count}/{total_count}',
 	]
 
 	if success_count == total_count:
-		summary.append('Status: All accounts check-in successful!')
+		summary.append('状态: 全部账号签到成功！')
+	elif success_count + skipped_count == total_count:
+		summary.append('状态: 全部账号已处理（部分今日已签到）')
 	elif success_count > 0:
-		summary.append('Status: Some accounts check-in successful')
+		summary.append('状态: 部分账号签到成功')
 	else:
-		summary.append('Status: All accounts check-in failed')
+		summary.append('状态: 全部账号签到失败')
 
 	# 添加余额变化汇总
 	if balance_changes:
 		summary.append('')
-		summary.append('--- Balance Changes ---')
+		summary.append('--- 余额变化 ---')
 		summary.extend(balance_changes)
 
-	time_info = f'Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+	time_info = f'执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
 	notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 
 	print(notify_content)
 
-	notify.push_message('AnyRouter Check-in Results', notify_content, msg_type='text')
+	notify.push_message('AnyRouter 签到结果', notify_content, msg_type='text')
 
-	# 设置退出码
-	sys.exit(0 if success_count > 0 else 1)
+	# 设置退出码（成功或已签到都算正常）
+	sys.exit(0 if (success_count > 0 or skipped_count > 0) else 1)
 
 
 def run_main():
