@@ -28,13 +28,23 @@ class NotificationKit:
 		if not self.email_user or not self.email_pass or not self.email_to:
 			raise ValueError('Email configuration not set')
 
-		msg = MIMEMultipart()
+		# 确保内容不为空
+		if not content or not content.strip():
+			content = '(No content available)'
+
+		msg = MIMEMultipart('alternative')
 		msg['From'] = f'AnyRouter Assistant <{self.email_user}>'
 		msg['To'] = self.email_to
 		msg['Subject'] = title
 
-		body = MIMEText(content, msg_type, 'utf-8')
-		msg.attach(body)
+		# 同时添加纯文本和 HTML 版本，确保兼容性
+		text_part = MIMEText(content, 'plain', 'utf-8')
+		msg.attach(text_part)
+
+		# 如果是 HTML 格式，额外添加 HTML 版本
+		if msg_type == 'html':
+			html_part = MIMEText(content, 'html', 'utf-8')
+			msg.attach(html_part)
 
 		smtp_server = f'smtp.{self.email_user.split("@")[1]}'
 		with smtplib.SMTP_SSL(smtp_server, 465, timeout=int(NOTIFY_TIMEOUT)) as server:

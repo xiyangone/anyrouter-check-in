@@ -34,11 +34,18 @@ class AccountConfig(TypedDict):
 	api_user: str
 
 
+class BalanceInfo(TypedDict):
+	quota: float
+	used_quota: float
+
+
 class CheckinResult(TypedDict):
 	success: bool
 	account_index: int
 	user_info: str | None
 	error: str | None
+	balance_before: BalanceInfo | None
+	balance_after: BalanceInfo | None
 
 
 # ============ 工具函数 ============
@@ -197,8 +204,8 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 	return waf_cookies_list
 
 
-async def get_user_info(client: httpx.AsyncClient, headers: dict[str, str], account_name: str) -> str | None:
-	"""异步获取用户信息"""
+async def get_user_info(client: httpx.AsyncClient, headers: dict[str, str], account_name: str) -> tuple[BalanceInfo | None, str | None]:
+	"""异步获取用户信息，返回 (余额信息, 格式化字符串)"""
 	try:
 		response = await client.get(f'{ANYROUTER_BASE_URL}/api/user/self', headers=headers, timeout=DEFAULT_TIMEOUT)
 
@@ -208,10 +215,12 @@ async def get_user_info(client: httpx.AsyncClient, headers: dict[str, str], acco
 				user_data = data.get('data', {})
 				quota = round(user_data.get('quota', 0) / 500000, 2)
 				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
-				return f':money: Current balance: ${quota}, Used: ${used_quota}'
+				balance_info = BalanceInfo(quota=quota, used_quota=used_quota)
+				info_str = f'Balance: ${quota}, Used: ${used_quota}'
+				return balance_info, info_str
 	except Exception as e:
 		print(f'[WARN] {account_name}: Failed to get user info: {str(e)[:50]}')
-	return None
+	return None, None
 
 
 def build_headers(api_user: str) -> dict[str, str]:
@@ -277,7 +286,7 @@ async def check_in_account(
 
 	if not api_user:
 		print(f'[FAILED] {account_name}: API user identifier not found')
-		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Missing api_user')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Missing api_user', balance_before=None, balance_after=None)
 
 	# 日志脱敏
 	print(f'[INFO] {account_name}: API user: {mask_sensitive(api_user)}')
@@ -286,12 +295,12 @@ async def check_in_account(
 	user_cookies = parse_cookies(cookies_data)
 	if not user_cookies:
 		print(f'[FAILED] {account_name}: Invalid configuration format')
-		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Invalid cookies')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='Invalid cookies', balance_before=None, balance_after=None)
 
 	# 检查 WAF cookies
 	if not waf_cookies:
 		print(f'[FAILED] {account_name}: WAF cookies not available')
-		return CheckinResult(success=False, account_index=account_index, user_info=None, error='WAF cookies failed')
+		return CheckinResult(success=False, account_index=account_index, user_info=None, error='WAF cookies failed', balance_before=None, balance_after=None)
 
 	# 合并 cookies
 	all_cookies = {**waf_cookies, **user_cookies}
@@ -303,10 +312,10 @@ async def check_in_account(
 	for name, value in all_cookies.items():
 		client.cookies.set(name, value, domain='anyrouter.top')
 
-	# 获取用户信息
-	user_info = await get_user_info(client, headers, account_name)
-	if user_info:
-		print(f'[INFO] {account_name}: {user_info}')
+	# 获取签到前的余额
+	balance_before, info_before = await get_user_info(client, headers, account_name)
+	if info_before:
+		print(f'[INFO] {account_name}: Before check-in - {info_before}')
 
 	# 执行签到
 	print(f'[NETWORK] {account_name}: Executing check-in')
@@ -317,10 +326,31 @@ async def check_in_account(
 	else:
 		print(f'[FAILED] {account_name}: Check-in failed - {error}')
 
+	# 获取签到后的余额
+	balance_after, info_after = await get_user_info(client, headers, account_name)
+	if info_after:
+		print(f'[INFO] {account_name}: After check-in - {info_after}')
+
+	# 计算余额变化
+	user_info = info_after or info_before
+	if balance_before and balance_after:
+		quota_change = balance_after['quota'] - balance_before['quota']
+		if quota_change != 0:
+			change_str = f'+${quota_change}' if quota_change > 0 else f'-${abs(quota_change)}'
+			print(f'[BALANCE] {account_name}: Balance changed: {change_str}')
+			user_info = f"{info_after} (Change: {change_str})"
+
 	# 清除 cookies 以便下一个账号使用
 	client.cookies.clear()
 
-	return CheckinResult(success=success, account_index=account_index, user_info=user_info, error=error if not success else None)
+	return CheckinResult(
+		success=success,
+		account_index=account_index,
+		user_info=user_info,
+		error=error if not success else None,
+		balance_before=balance_before,
+		balance_after=balance_after
+	)
 
 
 async def main():
@@ -354,37 +384,51 @@ async def main():
 	# 处理结果
 	success_count = 0
 	notification_content = []
+	balance_changes = []
 
 	for i, result in enumerate(results):
 		if isinstance(result, Exception):
 			print(f'[FAILED] Account {i + 1} processing exception: {result}')
-			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(result)[:50]}...')
+			notification_content.append(f'[FAIL] Account {i + 1}: Exception - {str(result)[:50]}...')
 		else:
 			if result['success']:
 				success_count += 1
-			status = '[SUCCESS]' if result['success'] else '[FAIL]'
-			account_result = f'{status} Account {i + 1}'
+			status = 'SUCCESS' if result['success'] else 'FAIL'
+			account_result = f'[{status}] Account {i + 1}'
 			if result['user_info']:
-				account_result += f'\n{result["user_info"]}'
+				account_result += f'\n  {result["user_info"]}'
 			if result['error']:
-				account_result += f'\nError: {result["error"]}'
+				account_result += f'\n  Error: {result["error"]}'
 			notification_content.append(account_result)
+
+			# 记录余额变化
+			if result['balance_before'] and result['balance_after']:
+				change = result['balance_after']['quota'] - result['balance_before']['quota']
+				if change != 0:
+					change_str = f'+${change}' if change > 0 else f'-${abs(change)}'
+					balance_changes.append(f'Account {i + 1}: {change_str}')
 
 	# 构建通知内容
 	summary = [
-		'[STATS] Check-in result statistics:',
-		f'[SUCCESS] Success: {success_count}/{total_count}',
-		f'[FAIL] Failed: {total_count - success_count}/{total_count}',
+		'--- Check-in Statistics ---',
+		f'Success: {success_count}/{total_count}',
+		f'Failed: {total_count - success_count}/{total_count}',
 	]
 
 	if success_count == total_count:
-		summary.append('[SUCCESS] All accounts check-in successful!')
+		summary.append('Status: All accounts check-in successful!')
 	elif success_count > 0:
-		summary.append('[WARN] Some accounts check-in successful')
+		summary.append('Status: Some accounts check-in successful')
 	else:
-		summary.append('[ERROR] All accounts check-in failed')
+		summary.append('Status: All accounts check-in failed')
 
-	time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+	# 添加余额变化汇总
+	if balance_changes:
+		summary.append('')
+		summary.append('--- Balance Changes ---')
+		summary.extend(balance_changes)
+
+	time_info = f'Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
 	notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 
