@@ -68,7 +68,7 @@ async def retry_async(coro_func, max_retries: int = MAX_RETRIES, base_delay: flo
 			last_exception = e
 			if attempt < max_retries - 1:
 				delay = base_delay * (2 ** attempt)
-				print(f'[RETRY] Attempt {attempt + 1} failed, retrying in {delay}s...')
+				print(f'[重试] 第 {attempt + 1} 次失败，{delay}秒后重试...')
 				await asyncio.sleep(delay)
 	raise last_exception
 
@@ -77,7 +77,7 @@ def load_accounts():
 	"""从环境变量加载多账号配置"""
 	accounts_str = os.getenv('ANYROUTER_ACCOUNTS')
 	if not accounts_str:
-		print('ERROR: ANYROUTER_ACCOUNTS environment variable not found')
+		print('[错误] 未找到 ANYROUTER_ACCOUNTS 环境变量')
 		return None
 
 	try:
@@ -85,21 +85,21 @@ def load_accounts():
 
 		# 检查是否为数组格式
 		if not isinstance(accounts_data, list):
-			print('ERROR: Account configuration must use array format [{}]')
+			print('[错误] 账号配置必须使用数组格式 [{}]')
 			return None
 
 		# 验证账号数据格式
 		for i, account in enumerate(accounts_data):
 			if not isinstance(account, dict):
-				print(f'ERROR: Account {i + 1} configuration format is incorrect')
+				print(f'[错误] 账号 {i + 1} 配置格式不正确')
 				return None
 			if 'cookies' not in account or 'api_user' not in account:
-				print(f'ERROR: Account {i + 1} missing required fields (cookies, api_user)')
+				print(f'[错误] 账号 {i + 1} 缺少必需字段 (cookies, api_user)')
 				return None
 
 		return accounts_data
 	except Exception as e:
-		print(f'ERROR: Account configuration format is incorrect: {e}')
+		print(f'[错误] 账号配置格式不正确: {e}')
 		return None
 
 
@@ -128,7 +128,7 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 	page = await context.new_page()
 
 	try:
-		print(f'[PROCESSING] {account_name}: Accessing login page to get WAF cookies...')
+		print(f'[处理中] {account_name}: 访问登录页获取 WAF cookies...')
 
 		await page.goto(f'{ANYROUTER_BASE_URL}/login', wait_until='networkidle', timeout=DEFAULT_TIMEOUT * 1000)
 
@@ -144,19 +144,19 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 			if cookie['name'] in WAF_COOKIE_NAMES:
 				waf_cookies[cookie['name']] = cookie['value']
 
-		print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies')
+		print(f'[信息] {account_name}: 获取到 {len(waf_cookies)} 个 WAF cookies')
 
 		missing_cookies = [c for c in WAF_COOKIE_NAMES if c not in waf_cookies]
 
 		if missing_cookies:
-			print(f'[FAILED] {account_name}: Missing WAF cookies: {missing_cookies}')
+			print(f'[失败] {account_name}: 缺少 WAF cookies: {missing_cookies}')
 			return None
 
-		print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
+		print(f'[成功] {account_name}: 成功获取所有 WAF cookies')
 		return waf_cookies
 
 	except Exception as e:
-		print(f'[FAILED] {account_name}: Error getting WAF cookies: {str(e)[:100]}')
+		print(f'[失败] {account_name}: 获取 WAF cookies 出错: {str(e)[:100]}')
 		return None
 	finally:
 		await context.close()
@@ -164,7 +164,7 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 
 async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]:
 	"""批量获取所有账号的 WAF cookies，复用单个浏览器实例"""
-	print(f'[SYSTEM] Starting browser to get WAF cookies for {account_count} accounts...')
+	print(f'[系统] 启动浏览器为 {account_count} 个账号获取 WAF cookies...')
 
 	waf_cookies_list: list[dict[str, str] | None] = []
 
@@ -182,7 +182,7 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 
 		try:
 			for i in range(account_count):
-				account_name = f'Account {i + 1}'
+				account_name = f'账号 {i + 1}'
 
 				# 带重试的 WAF cookies 获取
 				waf_cookies = None
@@ -192,7 +192,7 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 						break
 					if attempt < MAX_RETRIES - 1:
 						delay = RETRY_BASE_DELAY * (2 ** attempt)
-						print(f'[RETRY] {account_name}: Retrying WAF cookies in {delay}s...')
+						print(f'[重试] {account_name}: {delay}秒后重试获取 WAF cookies...')
 						await asyncio.sleep(delay)
 
 				waf_cookies_list.append(waf_cookies)
@@ -200,7 +200,7 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 		finally:
 			await browser.close()
 
-	print(f'[SYSTEM] Browser closed. Got WAF cookies for {sum(1 for c in waf_cookies_list if c)} accounts')
+	print(f'[系统] 浏览器已关闭。成功获取 {sum(1 for c in waf_cookies_list if c)} 个账号的 WAF cookies')
 	return waf_cookies_list
 
 
@@ -250,7 +250,7 @@ async def do_checkin_request(client: httpx.AsyncClient, headers: dict[str, str],
 
 	try:
 		response = await retry_async(_request)
-		print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
+		print(f'[响应] {account_name}: HTTP 状态码 {response.status_code}')
 
 		if response.status_code == 200:
 			try:
@@ -258,12 +258,12 @@ async def do_checkin_request(client: httpx.AsyncClient, headers: dict[str, str],
 				if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
 					return True, None
 				else:
-					error_msg = result.get('msg', result.get('message', 'Unknown error'))
+					error_msg = result.get('msg', result.get('message', '未知错误'))
 					return False, error_msg
 			except json.JSONDecodeError:
 				if 'success' in response.text.lower():
 					return True, None
-				return False, 'Invalid response format'
+				return False, '响应格式无效'
 		else:
 			return False, f'HTTP {response.status_code}'
 	except Exception as e:
@@ -476,10 +476,10 @@ def run_main():
 	try:
 		asyncio.run(main())
 	except KeyboardInterrupt:
-		print('\n[WARNING] Program interrupted by user')
+		print('\n[警告] 程序被用户中断')
 		sys.exit(1)
 	except Exception as e:
-		print(f'\n[FAILED] Error occurred during program execution: {e}')
+		print(f'\n[失败] 程序执行出错: {e}')
 		sys.exit(1)
 
 
