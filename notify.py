@@ -47,9 +47,16 @@ class NotificationKit:
 			msg.attach(html_part)
 
 		smtp_server = f'smtp.{self.email_user.split("@")[1]}'
-		with smtplib.SMTP_SSL(smtp_server, 465, timeout=int(NOTIFY_TIMEOUT)) as server:
+		server = smtplib.SMTP_SSL(smtp_server, 465, timeout=int(NOTIFY_TIMEOUT))
+		try:
 			server.login(self.email_user, self.email_pass)
 			server.send_message(msg)
+		finally:
+			try:
+				server.quit()
+			except Exception:
+				# 忽略关闭连接时的异常，邮件已发送成功
+				pass
 
 	def send_pushplus(self, title: str, content: str) -> None:
 		"""发送 PushPlus 通知"""

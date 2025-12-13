@@ -67,4 +67,9 @@ jobs:
       if: always()
       run: |
         echo "签到任务执行完成"
-        echo "时间: $(Get-Date)"
+        $beijingTime = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time"))
+        echo "北京时间: $($beijingTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+        echo ""
+        echo "--- 定时执行说明 ---"
+        echo "本任务每 8 小时执行一次 (UTC 0:00, 8:00, 16:00)"
+        echo "对应北京时间: 08:00, 16:00, 00:00"
