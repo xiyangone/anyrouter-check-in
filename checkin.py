@@ -55,6 +55,98 @@ def get_beijing_time() -> str:
 	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 
+def build_html_notification(results: list, success_count: int, skipped_count: int, total_count: int) -> str:
+	"""构建 HTML 格式的邮件通知内容"""
+	fail_count = total_count - success_count - skipped_count
+
+	# 状态颜色映射
+	status_styles = {
+		'success': ('background: #4CAF50; color: white;', '✅ 成功'),
+		'skipped': ('background: #9E9E9E; color: white;', '⏭️ 已签'),
+		'failed': ('background: #F44336; color: white;', '❌ 失败'),
+	}
+
+	# 构建账号卡片
+	account_cards = []
+	for i, result in enumerate(results):
+		if isinstance(result, Exception):
+			status_key = 'failed'
+			info = f'异常: {str(result)[:50]}'
+		else:
+			if result['success']:
+				status_key = 'success'
+			elif result['error'] == '今日已签到':
+				status_key = 'skipped'
+			else:
+				status_key = 'failed'
+			info = result['user_info'] or ''
+			if result['error'] and result['error'] != '今日已签到':
+				info += f'<br><span style="color: #F44336;">错误: {result["error"]}</span>'
+
+		style, label = status_styles[status_key]
+		card = f'''
+		<div style="background: #f8f9fa; border-radius: 8px; padding: 15px; margin: 10px 0; border-left: 4px solid {'#4CAF50' if status_key == 'success' else '#F44336' if status_key == 'failed' else '#9E9E9E'};">
+			<div style="display: flex; align-items: center; gap: 10px;">
+				<span style="{style} padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: bold;">{label}</span>
+				<span style="font-weight: bold; color: #333;">账号 {i + 1}</span>
+			</div>
+			<p style="margin: 10px 0 0 0; color: #666; font-size: 14px;">{info}</p>
+		</div>'''
+		account_cards.append(card)
+
+	# 整体状态
+	if success_count == total_count:
+		overall_status = '🎉 全部账号签到成功！'
+		overall_color = '#4CAF50'
+	elif success_count + skipped_count == total_count:
+		overall_status = '✅ 全部账号已处理'
+		overall_color = '#2196F3'
+	elif success_count > 0:
+		overall_status = '⚠️ 部分账号签到成功'
+		overall_color = '#FF9800'
+	else:
+		overall_status = '❌ 全部账号签到失败'
+		overall_color = '#F44336'
+
+	html = f'''
+	<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
+		<div style="text-align: center; padding: 20px 0; border-bottom: 2px solid {overall_color};">
+			<h1 style="margin: 0; color: #333; font-size: 24px;">🎯 AnyRouter 签到结果</h1>
+			<p style="margin: 10px 0 0 0; color: #666; font-size: 14px;">执行时间: {get_beijing_time()} (北京时间)</p>
+		</div>
+
+		<div style="padding: 20px 0;">
+			<h3 style="margin: 0 0 15px 0; color: #333; font-size: 16px;">📋 账号状态</h3>
+			{''.join(account_cards)}
+		</div>
+
+		<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 20px; margin-top: 20px; color: white;">
+			<h3 style="margin: 0 0 15px 0; font-size: 16px;">📊 签到统计</h3>
+			<div style="display: flex; justify-content: space-around; text-align: center;">
+				<div>
+					<div style="font-size: 28px; font-weight: bold;">{success_count}</div>
+					<div style="font-size: 12px; opacity: 0.9;">签到成功</div>
+				</div>
+				<div>
+					<div style="font-size: 28px; font-weight: bold;">{skipped_count}</div>
+					<div style="font-size: 12px; opacity: 0.9;">今日已签</div>
+				</div>
+				<div>
+					<div style="font-size: 28px; font-weight: bold;">{fail_count}</div>
+					<div style="font-size: 12px; opacity: 0.9;">签到失败</div>
+				</div>
+			</div>
+			<p style="margin: 15px 0 0 0; text-align: center; font-size: 14px; opacity: 0.9;">{overall_status}</p>
+		</div>
+
+		<div style="text-align: center; padding: 20px 0; color: #999; font-size: 12px;">
+			<p style="margin: 0;">Powered by AnyRouter Auto Check-in</p>
+		</div>
+	</div>'''
+
+	return html
+
+
 def mask_sensitive(value: str, visible_chars: int = 4) -> str:
 	"""脱敏敏感信息，保留首尾字符"""
 	if not value:
@@ -473,14 +565,17 @@ async def main():
 
 	time_info = f'执行时间: {get_beijing_time()} (北京时间)'
 
+	# 构建纯文本通知内容（用于控制台输出）
 	notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
-
 	print(notify_content)
+
+	# 构建 HTML 通知内容（用于邮件）
+	html_content = build_html_notification(results, success_count, skipped_count, total_count)
 
 	# 只有签到成功或失败才发送通知，全部已签到则不发送
 	fail_count = total_count - success_count - skipped_count
 	if success_count > 0 or fail_count > 0:
-		notify.push_message('AnyRouter 签到结果', notify_content, msg_type='text')
+		notify.push_message('AnyRouter 签到结果', html_content, msg_type='html')
 	else:
 		print('[通知] 全部账号今日已签到，跳过通知发送')
 
