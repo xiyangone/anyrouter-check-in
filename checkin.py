@@ -332,23 +332,27 @@ async def check_in_account(
 	if info_after:
 		print(f'[信息] {account_name}: 签到后 - {info_after}')
 
-	# 计算余额变化，判断签到是否真正成功
-	# 只有余额增加才算签到成功（每天只能签到一次）
+	# 计算实际签到奖励，判断签到是否真正成功
+	# 考虑使用消耗：实际奖励 = 余额变化 + 使用量变化
 	user_info = info_after or info_before
-	quota_change = 0.0
+	actual_reward = 0.0
 	actual_success = False
 	error_msg = None
 
 	if balance_before and balance_after:
 		quota_change = round(balance_after['quota'] - balance_before['quota'], 2)
-		if quota_change > 0:
-			# 余额增加，签到成功
+		used_change = round(balance_after['used_quota'] - balance_before['used_quota'], 2)
+		# 实际签到奖励 = 余额变化 + 使用量变化（使用会导致余额减少但used增加）
+		actual_reward = round(quota_change + used_change, 2)
+
+		if actual_reward > 0:
+			# 签到成功（即使同时有使用消耗）
 			actual_success = True
-			change_str = f'+${quota_change}'
+			change_str = f'+${actual_reward}'
 			print(f'[成功] {account_name}: 签到成功！余额变化: {change_str}')
 			user_info = f"{info_after} (变化: {change_str})"
 		elif api_success:
-			# API 返回成功但余额没变，说明今天已经签到过了
+			# API 返回成功但实际奖励为0，说明今天已经签到过了
 			actual_success = False
 			error_msg = '今日已签到'
 			print(f'[跳过] {account_name}: 今日已签到，余额无变化')
@@ -436,11 +440,13 @@ async def main():
 				account_result += f'\n  错误: {result["error"]}'
 			notification_content.append(account_result)
 
-			# 记录余额变化
+			# 记录余额变化（考虑使用消耗）
 			if result['balance_before'] and result['balance_after']:
-				change = round(result['balance_after']['quota'] - result['balance_before']['quota'], 2)
-				if change > 0:
-					balance_changes.append(f'账号 {i + 1}: +${change}')
+				quota_change = round(result['balance_after']['quota'] - result['balance_before']['quota'], 2)
+				used_change = round(result['balance_after']['used_quota'] - result['balance_before']['used_quota'], 2)
+				actual_reward = round(quota_change + used_change, 2)
+				if actual_reward > 0:
+					balance_changes.append(f'账号 {i + 1}: +${actual_reward}')
 
 	# 构建通知内容
 	summary = [
@@ -471,7 +477,12 @@ async def main():
 
 	print(notify_content)
 
-	notify.push_message('AnyRouter 签到结果', notify_content, msg_type='text')
+	# 只有签到成功或失败才发送通知，全部已签到则不发送
+	fail_count = total_count - success_count - skipped_count
+	if success_count > 0 or fail_count > 0:
+		notify.push_message('AnyRouter 签到结果', notify_content, msg_type='text')
+	else:
+		print('[通知] 全部账号今日已签到，跳过通知发送')
 
 	# 设置退出码（成功或已签到都算正常）
 	sys.exit(0 if (success_count > 0 or skipped_count > 0) else 1)

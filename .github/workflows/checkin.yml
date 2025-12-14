@@ -1,7 +1,7 @@
 name: AnyRouter 自动签到
 on:
   schedule:
-    - cron: '0 */8 * * *'
+    - cron: '0 */6 * * *'  # 每6小时执行一次 (UTC 0,6,12,18 -> 北京时间 8,14,20,2)
   workflow_dispatch:
 
 jobs:
@@ -71,5 +71,5 @@ jobs:
         echo "北京时间: $($beijingTime.ToString('yyyy-MM-dd HH:mm:ss'))"
         echo ""
         echo "--- 定时执行说明 ---"
-        echo "本任务每 8 小时执行一次 (UTC 0:00, 8:00, 16:00)"
-        echo "对应北京时间: 08:00, 16:00, 00:00"
+        echo "本任务每 6 小时执行一次 (UTC 0:00, 6:00, 12:00, 18:00)"
+        echo "对应北京时间: 08:00, 14:00, 20:00, 02:00"
