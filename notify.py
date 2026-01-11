@@ -2,7 +2,7 @@ import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Literal
+from typing import Callable, Literal
 
 import httpx
 
@@ -116,7 +116,7 @@ class NotificationKit:
 
 	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> None:
 		"""推送消息到所有已配置的通知渠道"""
-		notifications: list[tuple[str, callable]] = [
+		notifications: list[tuple[str, Callable[[], None]]] = [
 			('Email', lambda: self.send_email(title, content, msg_type)),
 			('PushPlus', lambda: self.send_pushplus(title, content)),
 			('Server Push', lambda: self.send_serverPush(title, content)),

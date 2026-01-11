@@ -5,3 +5,6 @@
 __pycache__
 .pytest_cache
 .ruff_cache
+
+# WAF cookies 缓存文件
+.waf_cache.json

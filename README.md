@@ -4,13 +4,25 @@
 
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢!**
 
-用于 Claude Code 中转站 Any Router 多账号每日签到，一次 $25，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。业界良心，支持 Claude Code 百万上下文（使用 `/model sonnet[1m]` 开启），`gemini-2.5-pro` 模型。
+用于 Claude Code 中转站 Any Router 多账号每日签到，一次 $25，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=PYoM)。业界良心，支持 Claude Code 百万上下文（使用 `/model sonnet[1m]` 开启），`gemini-2.5-pro` 模型。
 
 ## 功能特性
 
 - ✅ 单个/多账号自动签到
+- ✅ **WAF Cookies 缓存机制**（2 小时有效期，减少浏览器启动开销）
 - ✅ 多种机器人通知（可选）
-- ✅ 绕过 WAF 限制
+- ✅ 绕过 Cloudflare WAF 限制
+- ✅ 智能重试机制（3 次，指数退避）
+- ✅ 签到结果 HTML 邮件通知
+- ✅ 北京时区支持
+
+## 技术栈
+
+- **Python 3.11+**
+- **httpx**: HTTP/2 异步客户端
+- **playwright**: 浏览器自动化（WAF 绕过）
+- **asyncio**: 异步并发执行
+- **ruff**: 代码格式化和 linter
 
 ## 使用方法
 
@@ -21,10 +33,12 @@
 ### 2. 获取账号信息
 
 对于每个需要签到的账号，你需要获取：
+
 1. **Cookies**: 用于身份验证
 2. **API User**: 用于请求头的 new-api-user 参数
 
 #### 获取 Cookies：
+
 1. 打开浏览器，访问 https://anyrouter.top/
 2. 登录你的账户
 3. 打开开发者工具 (F12)
@@ -33,6 +47,7 @@
 6. 复制所有 cookies
 
 #### 获取 API User：
+
 通常在网站的用户设置或 API 设置中可以找到，每个账号都有唯一的标识。
 
 ### 3. 设置 GitHub Environment Secret
@@ -95,7 +110,7 @@
 
 ## 执行时间
 
-- 脚本每6小时执行一次（1. action 无法准确触发，基本延时 1~1.5h；2. 目前观测到 anyrouter 的签到是每 24h 而不是零点就可签到）
+- 脚本每 6 小时执行一次（UTC 0:00, 6:00, 12:00, 18:00 → 北京时间 08:00, 14:00, 20:00, 02:00）
 - 你也可以随时手动触发签到
 
 ## 注意事项
@@ -132,26 +147,33 @@
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
 
 ### 邮箱通知
+
 - `EMAIL_USER`: 发件人邮箱地址
 - `EMAIL_PASS`: 发件人邮箱密码/授权码
 - `EMAIL_TO`: 收件人邮箱地址
 
 ### 钉钉机器人
+
 - `DINGDING_WEBHOOK`: 钉钉机器人的 Webhook 地址
 
 ### 飞书机器人
+
 - `FEISHU_WEBHOOK`: 飞书机器人的 Webhook 地址
 
 ### 企业微信机器人
+
 - `WEIXIN_WEBHOOK`: 企业微信机器人的 Webhook 地址
 
 ### PushPlus 推送
+
 - `PUSHPLUS_TOKEN`: PushPlus 的 Token
 
-### Server酱
-- `SERVERPUSHKEY`: Server酱的 SendKey
+### Server 酱
+
+- `SERVERPUSHKEY`: Server 酱的 SendKey
 
 配置步骤：
+
 1. 在仓库的 Settings -> Environments -> production -> Environment secrets 中添加上述环境变量
 2. 每个通知方式都是独立的，可以只配置你需要的推送方式
 3. 如果某个通知方式配置不正确或未配置，脚本会自动跳过该通知方式
@@ -160,39 +182,99 @@
 
 如果签到失败，请检查：
 
-1. 账号配置格式是否正确
-2. cookies 是否过期
-3. API User 是否正确
-4. 网站是否更改了签到接口
-5. 查看 Actions 运行日志获取详细错误信息
+1. **账号配置格式是否正确** - 必须是 JSON 数组格式
+2. **cookies 是否过期** - session 值通常 1 个月有效期
+3. **API User 是否正确** - 正常是 5 位数字
+4. **网站是否更改了签到接口** - 查看 Network 面板确认
+5. **查看 Actions 运行日志** - 获取详细错误信息
+
+### 常见错误
+
+| 错误                 | 原因                | 解决方法               |
+| -------------------- | ------------------- | ---------------------- |
+| 401 Unauthorized     | cookies 过期或无效  | 重新获取 session 值    |
+| WAF cookies 获取失败 | Cloudflare 验证问题 | 脚本会自动重试 3 次    |
+| 今日已签到           | 24 小时内已签到过   | 无需处理，等待下次执行 |
 
 ## 本地开发环境设置
 
 如果你需要在本地测试或开发，请按照以下步骤设置：
 
 ```bash
-# 安装所有依赖
+# 克隆仓库
+git clone https://github.com/your-username/anyrouter-check-in.git
+cd anyrouter-check-in
+
+# 使用 uv 安装依赖
 uv sync --dev
 
 # 安装 Playwright 浏览器
-playwright install chromium
+uv run playwright install chromium
 
-# 按 .env.example 创建 .env
+# 按 .env.example 创建 .env 文件，配置账号信息
+cp .env.example .env
+
+# 运行签到脚本
 uv run checkin.py
+```
+
+### 环境变量配置
+
+创建 `.env` 文件（参考 `.env.example`）：
+
+```bash
+# 账号配置（JSON 数组格式）
+ANYROUTER_ACCOUNTS=[
+  {
+    "cookies": {"session": "your_session_value"},
+    "api_user": "your_api_user_id"
+  }
+]
+
+# 通知配置（可选）
+EMAIL_USER=your_email@example.com
+EMAIL_PASS=your_password_or_app_token
+EMAIL_TO=recipient@example.com
 ```
 
 ## 测试
 
 ```bash
+# 安装依赖
 uv sync --dev
 
 # 安装 Playwright 浏览器
-playwright install chromium
+uv run playwright install chromium
 
 # 运行测试
 uv run pytest tests/
+
+# 运行测试并显示覆盖率
+uv run pytest tests/ --cov=. --cov-report=term-missing
 ```
+
+## 更新日志
+
+### v1.1.0 (2025-01-11)
+
+- ✨ 新增 WAF cookies 缓存机制（2 小时有效期，减少浏览器启动开销）
+- ✨ 新增 HTML 格式邮件通知，美化签到结果展示
+- ✨ 添加北京时区支持，完善日志中文化
+- 🐛 修复签到判断逻辑，优化执行频率和通知策略
+- 🐛 修复邮件通知误报失败问题
+- 🔧 更新依赖版本（playwright 1.56.0, ruff 0.14.0）
+- 🔧 修复测试文件中的 mock 问题（requests → httpx）
+
+### v1.0.0
+
+- 初始版本，支持多账号自动签到
+- 支持 Cloudflare WAF 绕过
+- 支持多种通知方式
 
 ## 免责声明
 
-本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款.
+本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款。
+
+## 开源协议
+
+[MIT License](./LICENSE)

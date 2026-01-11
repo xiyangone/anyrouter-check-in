@@ -7,7 +7,8 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TypedDict
 
 import httpx
@@ -25,6 +26,9 @@ WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0
+# WAF cookies 缓存配置
+WAF_CACHE_FILE = Path('.waf_cache.json')
+WAF_CACHE_TTL = timedelta(hours=2)  # 缓存有效期 2 小时
 
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
 
@@ -53,6 +57,45 @@ class CheckinResult(TypedDict):
 def get_beijing_time() -> str:
 	"""获取北京时间字符串"""
 	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def load_waf_cache() -> dict[str, str] | None:
+	"""从文件加载 WAF cookies 缓存"""
+	if not WAF_CACHE_FILE.exists():
+		return None
+
+	try:
+		cache_data = json.loads(WAF_CACHE_FILE.read_text(encoding='utf-8'))
+		cached_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
+		cookies = cache_data.get('cookies', {})
+
+		# 检查缓存是否过期
+		if datetime.now(BEIJING_TZ) - cached_time < WAF_CACHE_TTL:
+			# 验证缓存是否包含所有必需的 cookies
+			if all(name in cookies for name in WAF_COOKIE_NAMES):
+				print(f'[缓存] 使用缓存的 WAF cookies (过期时间: {cached_time.strftime("%Y-%m-%d %H:%M:%S")})')
+				return cookies
+			else:
+				print('[缓存] 缓存的 cookies 不完整，将重新获取')
+		else:
+			print('[缓存] WAF cookies 已过期，将重新获取')
+	except Exception as e:
+		print(f'[缓存] 读取缓存文件失败: {e}')
+
+	return None
+
+
+def save_waf_cache(cookies: dict[str, str]) -> None:
+	"""保存 WAF cookies 到缓存文件"""
+	try:
+		cache_data = {
+			'timestamp': datetime.now(BEIJING_TZ).isoformat(),
+			'cookies': cookies,
+		}
+		WAF_CACHE_FILE.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding='utf-8')
+		print('[缓存] WAF cookies 已保存到缓存文件')
+	except Exception as e:
+		print(f'[缓存] 保存缓存文件失败: {e}')
 
 
 def build_html_notification(results: list, success_count: int, skipped_count: int, total_count: int) -> str:
@@ -261,10 +304,20 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 
 
 async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]:
-	"""批量获取所有账号的 WAF cookies，复用单个浏览器实例"""
-	print(f'[系统] 启动浏览器为 {account_count} 个账号获取 WAF cookies...')
-
+	"""批量获取所有账号的 WAF cookies，支持缓存机制"""
 	waf_cookies_list: list[dict[str, str] | None] = []
+
+	# 步骤1: 尝试从缓存加载
+	cached_cookies = load_waf_cache()
+	if cached_cookies:
+		# 缓存命中，所有账号共用同一份 WAF cookies
+		print('[系统] 使用缓存的 WAF cookies，无需启动浏览器')
+		for _ in range(account_count):
+			waf_cookies_list.append(cached_cookies.copy())
+		return waf_cookies_list
+
+	# 步骤2: 缓存未命中，启动浏览器获取
+	print(f'[系统] 启动浏览器为 {account_count} 个账号获取 WAF cookies...')
 
 	async with async_playwright() as p:
 		browser = await p.chromium.launch(
@@ -279,26 +332,33 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 		)
 
 		try:
-			for i in range(account_count):
-				account_name = f'账号 {i + 1}'
+			# 只需要获取一次 WAF cookies，所有账号共用
+			account_name = '账号 1'
+			waf_cookies = None
+			for attempt in range(MAX_RETRIES):
+				waf_cookies = await get_single_waf_cookies(browser, account_name)
+				if waf_cookies:
+					break
+				if attempt < MAX_RETRIES - 1:
+					delay = RETRY_BASE_DELAY * (2 ** attempt)
+					print(f'[重试] {account_name}: {delay}秒后重试获取 WAF cookies...')
+					await asyncio.sleep(delay)
 
-				# 带重试的 WAF cookies 获取
-				waf_cookies = None
-				for attempt in range(MAX_RETRIES):
-					waf_cookies = await get_single_waf_cookies(browser, account_name)
-					if waf_cookies:
-						break
-					if attempt < MAX_RETRIES - 1:
-						delay = RETRY_BASE_DELAY * (2 ** attempt)
-						print(f'[重试] {account_name}: {delay}秒后重试获取 WAF cookies...')
-						await asyncio.sleep(delay)
-
-				waf_cookies_list.append(waf_cookies)
+			if waf_cookies:
+				# 保存到缓存
+				save_waf_cache(waf_cookies)
+				# 所有账号共用同一份 WAF cookies
+				for _ in range(account_count):
+					waf_cookies_list.append(waf_cookies.copy())
+			else:
+				# 获取失败，返回 None 列表
+				waf_cookies_list = [None] * account_count
 
 		finally:
 			await browser.close()
 
-	print(f'[系统] 浏览器已关闭。成功获取 {sum(1 for c in waf_cookies_list if c)} 个账号的 WAF cookies')
+	success_count = sum(1 for c in waf_cookies_list if c)
+	print(f'[系统] 浏览器已关闭。成功获取 {success_count} 个账号的 WAF cookies')
 	return waf_cookies_list
 
 
