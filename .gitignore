@@ -8,3 +8,4 @@ __pycache__
 
 # WAF cookies 缓存文件
 .waf_cache.json
+.ace-tool

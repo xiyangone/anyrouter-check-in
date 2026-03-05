@@ -1,0 +1,223 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AnyRouter 通知样式预览</title>
+  <style>
+    :root {
+      --bg: #eef2f7;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #dde5ef;
+      --ok: #188038;
+      --skip: #5f6368;
+      --fail: #d93025;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Google Sans', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    }
+    .shell {
+      max-width: 760px;
+      margin: 0 auto;
+      background: var(--surface);
+      border: 1px solid #d9e2ec;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+    }
+    .header {
+      text-align: center;
+      padding: 28px 24px 22px;
+      background: linear-gradient(135deg, #2eb872 0%, #1f9d66 56%, #178e67 100%);
+      border-bottom: 1px solid #1f9d66;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      color: #ffffff;
+    }
+    .header p {
+      margin: 8px 0 0;
+      color: rgba(255, 255, 255, 0.92);
+      font-size: 14px;
+    }
+    .status-pill {
+      margin-top: 14px;
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.24);
+      border: 1px solid rgba(255, 255, 255, 0.32);
+    }
+    .section {
+      padding: 22px 24px;
+    }
+    .section + .section {
+      border-top: 1px solid var(--line);
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px 10px;
+      text-align: center;
+      background: #f8fafc;
+    }
+    .value {
+      margin: 0;
+      font-size: 26px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    .label {
+      margin-top: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #64748b;
+    }
+    .cards {
+      display: grid;
+      gap: 10px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-left: 3px solid #c7cdd8;
+      border-radius: 10px;
+      background: #fcfdff;
+      padding: 12px;
+    }
+    .card.success { border-left-color: var(--ok); }
+    .card.skipped { border-left-color: var(--skip); }
+    .card.failed { border-left-color: var(--fail); }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .badge {
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      border-radius: 999px;
+      padding: 3px 9px;
+    }
+    .badge.success { background: var(--ok); }
+    .badge.skipped { background: var(--skip); }
+    .badge.failed { background: var(--fail); }
+    .account {
+      font-size: 13px;
+      font-weight: 600;
+      color: #202124;
+    }
+    .desc {
+      margin: 0;
+      font-size: 14px;
+      color: #3c4043;
+      line-height: 1.55;
+    }
+    .desc .error { color: var(--fail); font-weight: 600; }
+    .footer {
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+      padding: 16px 24px 20px;
+      border-top: 1px solid var(--line);
+    }
+    @media (max-width: 640px) {
+      body { padding: 12px; }
+      .stats { grid-template-columns: 1fr; }
+      .header { padding: 22px 16px 18px; }
+      .section { padding: 18px 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="header">
+      <h1>AnyRouter 签到结果</h1>
+      <p>执行时间: 2026-03-05 20:30:00 (北京时间)</p>
+      <span class="status-pill">⚠️ 部分账号签到成功</span>
+    </div>
+
+    <div class="section">
+      <h2>签到统计</h2>
+      <div class="stats">
+        <div class="stat">
+          <p class="value" style="color:#188038;">2</p>
+          <div class="label">签到成功</div>
+        </div>
+        <div class="stat">
+          <p class="value" style="color:#5f6368;">1</p>
+          <div class="label">今日已签</div>
+        </div>
+        <div class="stat">
+          <p class="value" style="color:#d93025;">1</p>
+          <div class="label">签到失败</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>账号状态</h2>
+      <div class="cards">
+        <div class="card success">
+          <div class="row">
+            <span class="badge success">✅ 成功</span>
+            <span class="account">账号 1</span>
+          </div>
+          <p class="desc">余额: $120.50, 已用: $30.20 (变化: +$1.00)</p>
+        </div>
+
+        <div class="card skipped">
+          <div class="row">
+            <span class="badge skipped">⏭️ 已签</span>
+            <span class="account">账号 2</span>
+          </div>
+          <p class="desc">余额: $80.00, 已用: $10.00 (今日已签到)</p>
+        </div>
+
+        <div class="card failed">
+          <div class="row">
+            <span class="badge failed">❌ 失败</span>
+            <span class="account">账号 3</span>
+          </div>
+          <p class="desc"><span class="error">错误: HTTP 403</span></p>
+        </div>
+
+        <div class="card failed">
+          <div class="row">
+            <span class="badge failed">❌ 失败</span>
+            <span class="account">账号 4</span>
+          </div>
+          <p class="desc"><span class="error">异常: Timeout after 30s</span></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">Preview Only · Powered by AnyRouter Auto Check-in</div>
+  </div>
+</body>
+</html>

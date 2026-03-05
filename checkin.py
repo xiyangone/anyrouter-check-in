@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from html import escape
 from pathlib import Path
 from typing import TypedDict
 
@@ -98,23 +99,29 @@ def save_waf_cache(cookies: dict[str, str]) -> None:
 		print(f'[缓存] 保存缓存文件失败: {e}')
 
 
-def build_html_notification(results: list, success_count: int, skipped_count: int, total_count: int) -> str:
-	"""构建 HTML 格式的邮件通知内容"""
+def build_html_notification(results: list[CheckinResult | BaseException], success_count: int, skipped_count: int, total_count: int) -> str:
+	"""构建实际发送使用的 HTML 通知内容"""
 	fail_count = total_count - success_count - skipped_count
-
-	# 状态颜色映射
-	status_styles = {
-		'success': ('background: #4CAF50; color: white;', '✅ 成功'),
-		'skipped': ('background: #9E9E9E; color: white;', '⏭️ 已签'),
-		'failed': ('background: #F44336; color: white;', '❌ 失败'),
+	status_meta = {
+		'success': {'label': '✅ 成功', 'badge_bg': '#188038', 'border': '#188038'},
+		'skipped': {'label': '⏭️ 已签', 'badge_bg': '#5f6368', 'border': '#5f6368'},
+		'failed': {'label': '❌ 失败', 'badge_bg': '#d93025', 'border': '#d93025'},
 	}
 
-	# 构建账号卡片
-	account_cards = []
-	for i, result in enumerate(results):
-		if isinstance(result, Exception):
+	if success_count == total_count:
+		overall_status = '🎉 全部账号签到成功'
+	elif success_count + skipped_count == total_count:
+		overall_status = '✅ 全部账号已处理'
+	elif success_count > 0:
+		overall_status = '⚠️ 部分账号签到成功'
+	else:
+		overall_status = '❌ 全部账号签到失败'
+
+	account_cards: list[str] = []
+	for index, result in enumerate(results, start=1):
+		if isinstance(result, BaseException):
 			status_key = 'failed'
-			info = f'异常: {str(result)[:50]}'
+			detail_html = f'<span style="color: #d93025; font-weight: 600;">异常: {escape(str(result)[:100])}</span>'
 		else:
 			if result['success']:
 				status_key = 'success'
@@ -122,72 +129,62 @@ def build_html_notification(results: list, success_count: int, skipped_count: in
 				status_key = 'skipped'
 			else:
 				status_key = 'failed'
-			info = result['user_info'] or ''
-			if result['error'] and result['error'] != '今日已签到':
-				info += f'<br><span style="color: #F44336;">错误: {result["error"]}</span>'
 
-		style, label = status_styles[status_key]
-		card = f'''
-		<div style="background: #f8f9fa; border-radius: 8px; padding: 15px; margin: 10px 0; border-left: 4px solid {'#4CAF50' if status_key == 'success' else '#F44336' if status_key == 'failed' else '#9E9E9E'};">
-			<div style="display: flex; align-items: center; gap: 10px;">
-				<span style="{style} padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: bold;">{label}</span>
-				<span style="font-weight: bold; color: #333;">账号 {i + 1}</span>
-			</div>
-			<p style="margin: 10px 0 0 0; color: #666; font-size: 14px;">{info}</p>
+			detail_parts: list[str] = []
+			if result['user_info']:
+				detail_parts.append(escape(result['user_info']).replace('\n', '<br>'))
+			if result['error'] == '今日已签到':
+				detail_parts.append('今日已签到')
+			elif result['error']:
+				detail_parts.append(f'<span style="color: #d93025; font-weight: 600;">错误: {escape(result["error"])}</span>')
+			detail_html = '<br>'.join(detail_parts) if detail_parts else '暂无详细信息'
+
+		meta = status_meta[status_key]
+		account_cards.append(
+			f'''<div style="border: 1px solid #dde5ef; border-left: 3px solid {meta['border']}; border-radius: 10px; background: #fcfdff; padding: 12px; margin-top: 10px;">
+				<div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px;">
+					<span style="display: inline-block; font-size: 12px; font-weight: 600; color: #ffffff; border-radius: 999px; padding: 3px 9px; background: {meta['badge_bg']};">{meta['label']}</span>
+					<span style="font-size: 13px; font-weight: 600; color: #202124;">账号 {index}</span>
+				</div>
+				<p style="margin: 0; font-size: 14px; color: #3c4043; line-height: 1.55;">{detail_html}</p>
+			</div>'''
+		)
+
+	stat_cards = [
+		('签到成功', success_count, '#188038'),
+		('今日已签', skipped_count, '#5f6368'),
+		('签到失败', fail_count, '#d93025'),
+	]
+	stats_html = ''.join(
+		f'''<div style="display: inline-block; vertical-align: top; width: 31%; min-width: 150px; margin: 0 1% 12px; border: 1px solid #dde5ef; border-radius: 10px; padding: 14px 10px; text-align: center; background: #f8fafc;">
+			<p style="margin: 0; font-size: 26px; font-weight: 600; line-height: 1.1; color: {color};">{value}</p>
+			<div style="margin-top: 6px; font-size: 12px; font-weight: 500; color: #64748b;">{label}</div>
 		</div>'''
-		account_cards.append(card)
+		for label, value, color in stat_cards
+	)
 
-	# 整体状态
-	if success_count == total_count:
-		overall_status = '🎉 全部账号签到成功！'
-		overall_color = '#4CAF50'
-	elif success_count + skipped_count == total_count:
-		overall_status = '✅ 全部账号已处理'
-		overall_color = '#2196F3'
-	elif success_count > 0:
-		overall_status = '⚠️ 部分账号签到成功'
-		overall_color = '#FF9800'
-	else:
-		overall_status = '❌ 全部账号签到失败'
-		overall_color = '#F44336'
-
-	html = f'''
-	<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
-		<div style="text-align: center; padding: 20px 0; border-bottom: 2px solid {overall_color};">
-			<h1 style="margin: 0; color: #333; font-size: 24px;">🎯 AnyRouter 签到结果</h1>
-			<p style="margin: 10px 0 0 0; color: #666; font-size: 14px;">执行时间: {get_beijing_time()} (北京时间)</p>
-		</div>
-
-		<div style="padding: 20px 0;">
-			<h3 style="margin: 0 0 15px 0; color: #333; font-size: 16px;">📋 账号状态</h3>
-			{''.join(account_cards)}
-		</div>
-
-		<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 20px; margin-top: 20px; color: white;">
-			<h3 style="margin: 0 0 15px 0; font-size: 16px;">📊 签到统计</h3>
-			<div style="display: flex; justify-content: space-around; text-align: center;">
-				<div>
-					<div style="font-size: 28px; font-weight: bold;">{success_count}</div>
-					<div style="font-size: 12px; opacity: 0.9;">签到成功</div>
-				</div>
-				<div>
-					<div style="font-size: 28px; font-weight: bold;">{skipped_count}</div>
-					<div style="font-size: 12px; opacity: 0.9;">今日已签</div>
-				</div>
-				<div>
-					<div style="font-size: 28px; font-weight: bold;">{fail_count}</div>
-					<div style="font-size: 12px; opacity: 0.9;">签到失败</div>
-				</div>
+	return f'''
+	<div style="margin: 0; padding: 24px 12px; background: #eef2f7; font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #1f2937;">
+		<div style="max-width: 760px; margin: 0 auto; background: #ffffff; border: 1px solid #d9e2ec; border-radius: 14px; overflow: hidden; box-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);">
+			<div style="text-align: center; padding: 28px 24px 22px; background: linear-gradient(135deg, #2eb872 0%, #1f9d66 56%, #178e67 100%); border-bottom: 1px solid #1f9d66;">
+				<h1 style="margin: 0; font-size: 24px; font-weight: 600; letter-spacing: 0.2px; color: #ffffff;">AnyRouter 签到结果</h1>
+				<p style="margin: 8px 0 0; color: rgba(255, 255, 255, 0.92); font-size: 14px;">执行时间: {get_beijing_time()} (北京时间)</p>
+				<span style="display: inline-block; margin-top: 14px; padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #ffffff; background: rgba(255, 255, 255, 0.24); border: 1px solid rgba(255, 255, 255, 0.32);">{overall_status}</span>
 			</div>
-			<p style="margin: 15px 0 0 0; text-align: center; font-size: 14px; opacity: 0.9;">{overall_status}</p>
-		</div>
 
-		<div style="text-align: center; padding: 20px 0; color: #999; font-size: 12px;">
-			<p style="margin: 0;">Powered by AnyRouter Auto Check-in</p>
+			<div style="padding: 22px 24px;">
+				<h2 style="margin: 0 0 14px; font-size: 16px; font-weight: 600; color: #1f2937;">签到统计</h2>
+				<div style="font-size: 0; text-align: center;">{stats_html}</div>
+			</div>
+
+			<div style="padding: 22px 24px; border-top: 1px solid #dde5ef;">
+				<h2 style="margin: 0 0 14px; font-size: 16px; font-weight: 600; color: #1f2937;">账号状态</h2>
+				{''.join(account_cards)}
+			</div>
+
+			<div style="text-align: center; font-size: 12px; color: #64748b; padding: 16px 24px 20px; border-top: 1px solid #dde5ef;">Powered by AnyRouter Auto Check-in</div>
 		</div>
 	</div>'''
-
-	return html
 
 
 def mask_sensitive(value: str, visible_chars: int = 4) -> str:
@@ -211,7 +208,9 @@ async def retry_async(coro_func, max_retries: int = MAX_RETRIES, base_delay: flo
 				delay = base_delay * (2 ** attempt)
 				print(f'[重试] 第 {attempt + 1} 次失败，{delay}秒后重试...')
 				await asyncio.sleep(delay)
-	raise last_exception
+	if last_exception is not None:
+		raise last_exception
+	raise RuntimeError('retry_async 执行结束但未捕获到可抛出的异常')
 
 
 def load_accounts():
@@ -282,8 +281,10 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 
 		waf_cookies = {}
 		for cookie in cookies:
-			if cookie['name'] in WAF_COOKIE_NAMES:
-				waf_cookies[cookie['name']] = cookie['value']
+			cookie_name = cookie.get('name')
+			cookie_value = cookie.get('value')
+			if cookie_name in WAF_COOKIE_NAMES and cookie_value is not None:
+				waf_cookies[cookie_name] = cookie_value
 
 		print(f'[信息] {account_name}: 获取到 {len(waf_cookies)} 个 WAF cookies')
 
@@ -555,7 +556,7 @@ async def main():
 	waf_cookies_list = await get_all_waf_cookies(total_count)
 
 	# 步骤2：使用异步 httpx 客户端并发执行签到
-	results: list[CheckinResult] = []
+	results: list[CheckinResult | BaseException] = []
 
 	async with httpx.AsyncClient(http2=True, timeout=DEFAULT_TIMEOUT) as client:
 		# 并发执行所有账号的签到
@@ -572,7 +573,7 @@ async def main():
 	balance_changes = []
 
 	for i, result in enumerate(results):
-		if isinstance(result, Exception):
+		if isinstance(result, BaseException):
 			print(f'[失败] 账号 {i + 1} 处理异常: {result}')
 			notification_content.append(f'[失败] 账号 {i + 1}: 异常 - {str(result)[:50]}...')
 		else:

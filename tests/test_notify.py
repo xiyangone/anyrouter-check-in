@@ -3,7 +3,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
 import pytest
 from dotenv import load_dotenv
 
@@ -107,6 +106,8 @@ def test_send_dingtalk(mock_client_class):
 	notification_kit.send_dingtalk('测试标题', '测试内容')
 
 	mock_client.post.assert_called_once()
+	args = mock_client.post.call_args[1]
+	assert args['json']['msgtype'] == 'text'
 
 
 @patch('httpx.Client')
@@ -141,6 +142,8 @@ def test_send_wecom(mock_client_class):
 	notification_kit.send_wecom('测试标题', '测试内容')
 
 	mock_client.post.assert_called_once()
+	args = mock_client.post.call_args[1]
+	assert args['json']['msgtype'] == 'text'
 
 
 def test_missing_config():
@@ -159,7 +162,8 @@ def test_missing_config():
 @patch('notify.NotificationKit.send_wecom')
 @patch('notify.NotificationKit.send_pushplus')
 @patch('notify.NotificationKit.send_feishu')
-def test_push_message(mock_feishu, mock_pushplus, mock_wecom, mock_dingtalk, mock_email):
+@patch('notify.NotificationKit.send_serverPush')
+def test_push_message(mock_server_push, mock_feishu, mock_pushplus, mock_wecom, mock_dingtalk, mock_email):
 	# 设置所有通知配置
 	os.environ['EMAIL_USER'] = 'test@example.com'
 	os.environ['EMAIL_PASS'] = 'password'
@@ -178,3 +182,16 @@ def test_push_message(mock_feishu, mock_pushplus, mock_wecom, mock_dingtalk, moc
 	assert mock_wecom.called
 	assert mock_pushplus.called
 	assert mock_feishu.called
+	assert mock_server_push.called
+	assert mock_dingtalk.call_args[0][2] == 'text'
+	assert mock_wecom.call_args[0][2] == 'text'
+	assert mock_feishu.call_args[0][2] == 'markdown'
+
+
+def test_html_to_text_conversion():
+	content = '<h1>标题</h1><p>第一行<br>第二行</p>'
+	text = NotificationKit._html_to_text(content)
+
+	assert '<h1>' not in text
+	assert '第一行' in text
+	assert '第二行' in text
