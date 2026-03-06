@@ -103,25 +103,54 @@ def build_html_notification(results: list[CheckinResult | BaseException], succes
 	"""构建实际发送使用的 HTML 通知内容"""
 	fail_count = total_count - success_count - skipped_count
 	status_meta = {
-		'success': {'label': '✅ 成功', 'badge_bg': '#188038', 'border': '#188038'},
-		'skipped': {'label': '⏭️ 已签', 'badge_bg': '#5f6368', 'border': '#5f6368'},
-		'failed': {'label': '❌ 失败', 'badge_bg': '#d93025', 'border': '#d93025'},
+		'success': {
+			'label': '✅ 成功',
+			'badge_bg': '#188038',
+			'soft': '#edf7ee',
+			'line': '#d4e8d7',
+		},
+		'skipped': {
+			'label': '⏭️ 已签',
+			'badge_bg': '#5f6368',
+			'soft': '#f1f3f4',
+			'line': '#e3e6e8',
+		},
+		'failed': {
+			'label': '❌ 失败',
+			'badge_bg': '#d93025',
+			'soft': '#fdeceb',
+			'line': '#f2d4d1',
+		},
 	}
 
 	if success_count == total_count:
 		overall_status = '🎉 全部账号签到成功'
+		overall_badge_bg = '#e6f4ea'
+		overall_badge_color = '#137333'
+		overall_badge_border = '#c7e7cf'
 	elif success_count + skipped_count == total_count:
 		overall_status = '✅ 全部账号已处理'
+		overall_badge_bg = '#ecf3fe'
+		overall_badge_color = '#185abc'
+		overall_badge_border = '#c7dafc'
 	elif success_count > 0:
 		overall_status = '⚠️ 部分账号签到成功'
+		overall_badge_bg = '#fff4dd'
+		overall_badge_color = '#b06000'
+		overall_badge_border = '#f0ddb4'
 	else:
 		overall_status = '❌ 全部账号签到失败'
+		overall_badge_bg = '#fce8e6'
+		overall_badge_color = '#c5221f'
+		overall_badge_border = '#efc6c2'
 
 	account_cards: list[str] = []
 	for index, result in enumerate(results, start=1):
 		if isinstance(result, BaseException):
 			status_key = 'failed'
-			detail_html = f'<span style="color: #d93025; font-weight: 600;">异常: {escape(str(result)[:100])}</span>'
+			detail_parts = [
+				f'<div style="margin-top: 8px; font-size: 14px; line-height: 1.65; color: #243445;"><span style="color: #d93025; font-weight: 700;">异常: {escape(str(result)[:100])}</span></div>'
+			]
 		else:
 			if result['success']:
 				status_key = 'success'
@@ -130,62 +159,98 @@ def build_html_notification(results: list[CheckinResult | BaseException], succes
 			else:
 				status_key = 'failed'
 
-			detail_parts: list[str] = []
+			detail_parts = []
 			if result['user_info']:
-				detail_parts.append(escape(result['user_info']).replace('\n', '<br>'))
+				escaped_user_info = escape(result['user_info']).replace('\n', '<br>')
+				detail_parts.append(
+					f'<div style="margin-top: 8px; font-size: 14px; line-height: 1.65; color: #243445;">{escaped_user_info}</div>'
+				)
 			if result['error'] == '今日已签到':
-				detail_parts.append('今日已签到')
+				detail_parts.append(
+					'<div style="margin-top: 8px; font-size: 13px; font-weight: 700; color: #5f6368;">今日已签到</div>'
+				)
 			elif result['error']:
-				detail_parts.append(f'<span style="color: #d93025; font-weight: 600;">错误: {escape(result["error"])}</span>')
-			detail_html = '<br>'.join(detail_parts) if detail_parts else '暂无详细信息'
+				detail_parts.append(
+					f'<div style="margin-top: 8px; font-size: 13px; line-height: 1.6;"><span style="color: #d93025; font-weight: 700;">错误: {escape(result["error"])}</span></div>'
+				)
+			if not detail_parts:
+				detail_parts.append(
+					'<div style="margin-top: 8px; font-size: 13px; color: #5f6b7a;">暂无详细信息</div>'
+				)
 
 		meta = status_meta[status_key]
 		account_cards.append(
-			f'''<div style="border: 1px solid #dde5ef; border-left: 3px solid {meta['border']}; border-radius: 10px; background: #fcfdff; padding: 12px; margin-top: 10px;">
-				<div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px;">
-					<span style="display: inline-block; font-size: 12px; font-weight: 600; color: #ffffff; border-radius: 999px; padding: 3px 9px; background: {meta['badge_bg']};">{meta['label']}</span>
-					<span style="font-size: 13px; font-weight: 600; color: #202124;">账号 {index}</span>
+			f'''<div style="margin-top: 12px; border: 1px solid {meta['line']}; border-radius: 16px; background: {meta['soft']}; padding: 14px 14px 12px;">
+				<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px;">
+					<span style="display: inline-block; padding: 4px 10px; border-radius: 999px; background: {meta['badge_bg']}; color: #ffffff; font-size: 12px; font-weight: 700;">{meta['label']}</span>
+					<span style="display: inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(145, 158, 171, 0.32); background: rgba(255, 255, 255, 0.78); color: #304155; font-size: 12px; font-weight: 700;">账号 {index:02d}</span>
 				</div>
-				<p style="margin: 0; font-size: 14px; color: #3c4043; line-height: 1.55;">{detail_html}</p>
+				{''.join(detail_parts)}
 			</div>'''
 		)
 
-	stat_cards = [
-		('签到成功', success_count, '#188038'),
-		('今日已签', skipped_count, '#5f6368'),
-		('签到失败', fail_count, '#d93025'),
-	]
-	stats_html = ''.join(
-		f'''<div style="display: inline-block; vertical-align: top; width: 31%; min-width: 150px; margin: 0 1% 12px; border: 1px solid #dde5ef; border-radius: 10px; padding: 14px 10px; text-align: center; background: #f8fafc;">
-			<p style="margin: 0; font-size: 26px; font-weight: 600; line-height: 1.1; color: {color};">{value}</p>
-			<div style="margin-top: 6px; font-size: 12px; font-weight: 500; color: #64748b;">{label}</div>
+	if total_count == 1:
+		if success_count == 1:
+			single_card = ('签到成功', 1, '#188038', '#edf7ee', '#d4e8d7', 100)
+		elif skipped_count == 1:
+			single_card = ('今日已签', 1, '#5f6368', '#f1f3f4', '#e3e6e8', 100)
+		else:
+			single_card = ('签到失败', 1, '#d93025', '#fdeceb', '#f2d4d1', 100)
+
+		label, value, color, soft, line, ratio = single_card
+		stats_html = f'''<div style="display: inline-block; vertical-align: top; width: 260px; max-width: 100%; margin: 0 auto 12px; border: 1px solid {line}; border-radius: 16px; padding: 16px; text-align: left; background: {soft};">
+			<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;">
+				<div>
+					<div style="font-size: 12px; font-weight: 700; color: #66758a;">{label}</div>
+					<div style="margin-top: 12px; font-size: 32px; line-height: 1; font-weight: 700; color: #1f2937;">{value}</div>
+					<div style="margin-top: 8px; font-size: 12px; color: #6f7d8c;">{value} / 1 账号</div>
+				</div>
+				<div style="width: 56px; height: 56px; border-radius: 50%; background: #ffffff; border: 6px solid {color}; text-align: center; line-height: 44px; font-size: 13px; font-weight: 700; color: {color}; box-sizing: border-box;">{ratio}%</div>
+			</div>
 		</div>'''
-		for label, value, color in stat_cards
-	)
+	else:
+		stat_cards = [
+			('签到成功', success_count, '#188038', '#edf7ee', '#d4e8d7', round(success_count / total_count * 100) if total_count else 0),
+			('今日已签', skipped_count, '#5f6368', '#f1f3f4', '#e3e6e8', round(skipped_count / total_count * 100) if total_count else 0),
+			('签到失败', fail_count, '#d93025', '#fdeceb', '#f2d4d1', round(fail_count / total_count * 100) if total_count else 0),
+		]
+		stats_html = ''.join(
+			f'''<div style="display: inline-block; vertical-align: top; width: 31%; min-width: 150px; margin: 0 1% 12px; border: 1px solid {line}; border-radius: 16px; padding: 16px; text-align: left; background: {soft};">
+				<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;">
+					<div>
+						<div style="font-size: 12px; font-weight: 700; color: #66758a;">{label}</div>
+						<div style="margin-top: 12px; font-size: 32px; line-height: 1; font-weight: 700; color: #1f2937;">{value}</div>
+						<div style="margin-top: 8px; font-size: 12px; color: #6f7d8c;">{value} / {total_count} 账号</div>
+					</div>
+					<div style="width: 56px; height: 56px; border-radius: 50%; background: #ffffff; border: 6px solid {color}; text-align: center; line-height: 44px; font-size: 13px; font-weight: 700; color: {color}; box-sizing: border-box;">{ratio}%</div>
+				</div>
+			</div>'''
+			for label, value, color, soft, line, ratio in stat_cards
+		)
 
 	return f'''
-	<div style="margin: 0; padding: 24px 12px; background: #eef2f7; font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #1f2937;">
-		<div style="max-width: 760px; margin: 0 auto; background: #ffffff; border: 1px solid #d9e2ec; border-radius: 14px; overflow: hidden; box-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);">
-			<div style="text-align: center; padding: 28px 24px 22px; background: linear-gradient(135deg, #2eb872 0%, #1f9d66 56%, #178e67 100%); border-bottom: 1px solid #1f9d66;">
-				<h1 style="margin: 0; font-size: 24px; font-weight: 600; letter-spacing: 0.2px; color: #ffffff;">AnyRouter 签到结果</h1>
-				<p style="margin: 8px 0 0; color: rgba(255, 255, 255, 0.92); font-size: 14px;">执行时间: {get_beijing_time()} (北京时间)</p>
-				<span style="display: inline-block; margin-top: 14px; padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #ffffff; background: rgba(255, 255, 255, 0.24); border: 1px solid rgba(255, 255, 255, 0.32);">{overall_status}</span>
+	<div style="margin: 0; padding: 28px 12px; background: #f3f6fb; font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #1f2937;">
+		<div style="max-width: 780px; margin: 0 auto; background: #ffffff; border: 1px solid #dce6f0; border-radius: 22px; overflow: hidden; box-shadow: 0 20px 48px rgba(15, 23, 42, 0.10);">
+			<div style="text-align: center; padding: 34px 26px 28px; background: linear-gradient(135deg, #36b66f 0%, #1f9b66 54%, #14785c 100%); color: #ffffff;">
+				<span style="display: inline-block; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.20); background: rgba(255, 255, 255, 0.14); font-size: 11px; letter-spacing: 1.1px; font-weight: 700;">ANYROUTER DAILY CHECK-IN</span>
+				<h1 style="margin: 16px 0 0; font-size: 30px; line-height: 1.15; letter-spacing: 0.3px; font-weight: 700; color: #ffffff;">签到结果通知</h1>
+				<p style="margin: 10px 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.92);">执行时间: {get_beijing_time()} (北京时间)</p>
+				<span style="display: inline-block; margin-top: 16px; padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 700; background: {overall_badge_bg}; color: {overall_badge_color}; border: 1px solid {overall_badge_border};">{overall_status}</span>
 			</div>
 
-			<div style="padding: 22px 24px;">
-				<h2 style="margin: 0 0 14px; font-size: 16px; font-weight: 600; color: #1f2937;">签到统计</h2>
+			<div style="padding: 26px 26px 10px;">
+				<div style="margin: 0 0 14px; font-size: 13px; font-weight: 800; letter-spacing: 1px; color: #5f6f82;">统计概览</div>
 				<div style="font-size: 0; text-align: center;">{stats_html}</div>
 			</div>
 
-			<div style="padding: 22px 24px; border-top: 1px solid #dde5ef;">
-				<h2 style="margin: 0 0 14px; font-size: 16px; font-weight: 600; color: #1f2937;">账号状态</h2>
+			<div style="padding: 16px 26px 26px; border-top: 1px solid #e7edf4;">
+				<div style="margin: 0 0 14px; font-size: 13px; font-weight: 800; letter-spacing: 1px; color: #5f6f82;">账号明细</div>
 				{''.join(account_cards)}
 			</div>
 
-			<div style="text-align: center; font-size: 12px; color: #64748b; padding: 16px 24px 20px; border-top: 1px solid #dde5ef;">Powered by AnyRouter Auto Check-in</div>
+			<div style="text-align: center; font-size: 12px; color: #607085; padding: 18px 24px 22px; border-top: 1px solid #e7edf4; background: #fbfcfe;">Powered by AnyRouter Auto Check-in</div>
 		</div>
 	</div>'''
-
 
 def mask_sensitive(value: str, visible_chars: int = 4) -> str:
 	"""脱敏敏感信息，保留首尾字符"""
@@ -658,3 +723,6 @@ def run_main():
 
 if __name__ == '__main__':
 	run_main()
+
+
+

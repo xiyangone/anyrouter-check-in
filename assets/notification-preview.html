@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -6,211 +6,322 @@
   <title>AnyRouter 通知样式预览</title>
   <style>
     :root {
-      --bg: #eef2f7;
+      --bg: #f3f6fb;
       --surface: #ffffff;
       --text: #1f2937;
-      --muted: #6b7280;
-      --line: #dde5ef;
-      --ok: #188038;
+      --muted: #66758a;
+      --line: #dce6f0;
+      --hero-a: #36b66f;
+      --hero-b: #14785c;
+      --success: #188038;
+      --success-soft: #edf7ee;
+      --success-line: #d4e8d7;
       --skip: #5f6368;
+      --skip-soft: #f1f3f4;
+      --skip-line: #e3e6e8;
       --fail: #d93025;
+      --fail-soft: #fdeceb;
+      --fail-line: #f2d4d1;
+      --warn: #b06000;
+      --warn-soft: #fff4dd;
+      --warn-line: #f0ddb4;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 24px;
-      background: var(--bg);
+      min-height: 100vh;
+      padding: 28px;
+      background:
+        radial-gradient(circle at top left, rgba(54, 182, 111, 0.16), transparent 28%),
+        linear-gradient(180deg, #f7f9fc 0%, var(--bg) 100%);
       color: var(--text);
-      font-family: 'Google Sans', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
     }
     .shell {
-      max-width: 760px;
+      max-width: 780px;
       margin: 0 auto;
       background: var(--surface);
-      border: 1px solid #d9e2ec;
-      border-radius: 14px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
       overflow: hidden;
-      box-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+      box-shadow: 0 20px 48px rgba(15, 23, 42, 0.10);
     }
     .header {
+      position: relative;
       text-align: center;
-      padding: 28px 24px 22px;
-      background: linear-gradient(135deg, #2eb872 0%, #1f9d66 56%, #178e67 100%);
-      border-bottom: 1px solid #1f9d66;
+      padding: 34px 26px 28px;
+      background: linear-gradient(135deg, var(--hero-a) 0%, #1f9b66 54%, var(--hero-b) 100%);
+      color: #fff;
     }
-    .header h1 {
-      margin: 0;
-      font-size: 24px;
-      font-weight: 600;
-      letter-spacing: 0.2px;
-      color: #ffffff;
+    .header::after {
+      content: '';
+      position: absolute;
+      inset: auto auto -24px -18px;
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+      filter: blur(8px);
     }
-    .header p {
-      margin: 8px 0 0;
-      color: rgba(255, 255, 255, 0.92);
-      font-size: 14px;
-    }
-    .status-pill {
-      margin-top: 14px;
+    .eyebrow {
       display: inline-block;
       padding: 6px 12px;
       border-radius: 999px;
-      font-size: 12px;
-      font-weight: 600;
-      color: #ffffff;
-      background: rgba(255, 255, 255, 0.24);
-      border: 1px solid rgba(255, 255, 255, 0.32);
+      border: 1px solid rgba(255, 255, 255, 0.20);
+      background: rgba(255, 255, 255, 0.14);
+      font-size: 11px;
+      letter-spacing: 1.1px;
+      font-weight: 700;
+    }
+    .header h1 {
+      margin: 16px 0 0;
+      font-size: 30px;
+      line-height: 1.15;
+      letter-spacing: 0.3px;
+      font-weight: 700;
+    }
+    .subtitle {
+      margin: 10px 0 0;
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.92);
+    }
+    .status-pill {
+      margin-top: 16px;
+      display: inline-block;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      border: 1px solid transparent;
+      background: #fff;
+    }
+    .status-pill.warning {
+      background: var(--warn-soft);
+      color: var(--warn);
+      border-color: var(--warn-line);
     }
     .section {
-      padding: 22px 24px;
+      padding: 26px;
     }
     .section + .section {
-      border-top: 1px solid var(--line);
+      border-top: 1px solid #e7edf4;
     }
-    h2 {
+    .section-title {
       margin: 0 0 14px;
-      font-size: 16px;
-      font-weight: 600;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      color: #5f6f82;
+    }
+    .section-tip {
+      margin: -4px 0 14px;
+      font-size: 12px;
+      color: #738295;
     }
     .stats {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+      gap: 14px;
     }
     .stat {
+      border-radius: 16px;
+      padding: 16px;
       border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 14px 10px;
-      text-align: center;
       background: #f8fafc;
     }
-    .value {
-      margin: 0;
-      font-size: 26px;
-      font-weight: 600;
-      line-height: 1.1;
+    .stat.success { background: var(--success-soft); border-color: var(--success-line); }
+    .stat.skipped { background: var(--skip-soft); border-color: var(--skip-line); }
+    .stat.failed { background: var(--fail-soft); border-color: var(--fail-line); }
+    .stat-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
     }
-    .label {
-      margin-top: 6px;
+    .stat-label {
       font-size: 12px;
-      font-weight: 500;
-      color: #64748b;
+      font-weight: 700;
+      color: var(--muted);
     }
+    .stat-value {
+      margin-top: 12px;
+      font-size: 32px;
+      line-height: 1;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .stat-note {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #6f7d8c;
+    }
+    .gauge {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #fff;
+      border: 6px solid currentColor;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .gauge.success { color: var(--success); }
+    .gauge.skipped { color: var(--skip); }
+    .gauge.failed { color: var(--fail); }
     .cards {
       display: grid;
-      gap: 10px;
+      gap: 12px;
     }
     .card {
+      border-radius: 16px;
+      padding: 14px;
       border: 1px solid var(--line);
-      border-left: 3px solid #c7cdd8;
-      border-radius: 10px;
-      background: #fcfdff;
-      padding: 12px;
+      background: #fbfdff;
     }
-    .card.success { border-left-color: var(--ok); }
-    .card.skipped { border-left-color: var(--skip); }
-    .card.failed { border-left-color: var(--fail); }
+    .card.success { background: var(--success-soft); border-color: var(--success-line); }
+    .card.skipped { background: var(--skip-soft); border-color: var(--skip-line); }
+    .card.failed { background: var(--fail-soft); border-color: var(--fail-line); }
     .row {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 8px;
+      gap: 12px;
+      margin-bottom: 10px;
     }
     .badge {
-      font-size: 12px;
-      font-weight: 600;
-      color: #fff;
+      display: inline-block;
+      padding: 4px 10px;
       border-radius: 999px;
-      padding: 3px 9px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
     }
-    .badge.success { background: var(--ok); }
+    .badge.success { background: var(--success); }
     .badge.skipped { background: var(--skip); }
     .badge.failed { background: var(--fail); }
     .account {
-      font-size: 13px;
-      font-weight: 600;
-      color: #202124;
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(145, 158, 171, 0.32);
+      background: rgba(255, 255, 255, 0.76);
+      color: #304155;
+      font-size: 12px;
+      font-weight: 700;
     }
     .desc {
       margin: 0;
       font-size: 14px;
-      color: #3c4043;
-      line-height: 1.55;
+      line-height: 1.65;
+      color: #243445;
     }
-    .desc .error { color: var(--fail); font-weight: 600; }
+    .desc .error {
+      color: var(--fail);
+      font-weight: 700;
+    }
+    .desc .muted {
+      color: #5f6368;
+      font-weight: 700;
+    }
     .footer {
       text-align: center;
       font-size: 12px;
-      color: #64748b;
-      padding: 16px 24px 20px;
-      border-top: 1px solid var(--line);
+      color: #607085;
+      padding: 18px 24px 22px;
+      border-top: 1px solid #e7edf4;
+      background: #fbfcfe;
     }
     @media (max-width: 640px) {
-      body { padding: 12px; }
+      body { padding: 14px; }
+      .header { padding: 28px 18px 24px; }
+      .header h1 { font-size: 25px; }
+      .section { padding: 20px 18px; }
       .stats { grid-template-columns: 1fr; }
-      .header { padding: 22px 16px 18px; }
-      .section { padding: 18px 16px; }
+      .row { flex-direction: column; align-items: flex-start; }
     }
   </style>
 </head>
 <body>
   <div class="shell">
     <div class="header">
-      <h1>AnyRouter 签到结果</h1>
-      <p>执行时间: 2026-03-05 20:30:00 (北京时间)</p>
-      <span class="status-pill">⚠️ 部分账号签到成功</span>
+      <span class="eyebrow">ANYROUTER DAILY CHECK-IN</span>
+      <h1>签到结果通知</h1>
+      <p class="subtitle">执行时间: 2026-03-05 20:30:00 (北京时间)</p>
+      <span class="status-pill warning">⚠️ 部分账号签到成功</span>
     </div>
 
     <div class="section">
-      <h2>签到统计</h2>
+      <h2 class="section-title">统计概览</h2>
+      <p class="section-tip">单账号模式下会自动切换为一张对应状态的仪表盘卡片，多账号保持当前三卡布局。</p>
       <div class="stats">
-        <div class="stat">
-          <p class="value" style="color:#188038;">2</p>
-          <div class="label">签到成功</div>
+        <div class="stat success">
+          <div class="stat-top">
+            <div>
+              <div class="stat-label">签到成功</div>
+              <div class="stat-value">2</div>
+              <div class="stat-note">2 / 4 账号</div>
+            </div>
+            <div class="gauge success">50%</div>
+          </div>
         </div>
-        <div class="stat">
-          <p class="value" style="color:#5f6368;">1</p>
-          <div class="label">今日已签</div>
+        <div class="stat skipped">
+          <div class="stat-top">
+            <div>
+              <div class="stat-label">今日已签</div>
+              <div class="stat-value">1</div>
+              <div class="stat-note">1 / 4 账号</div>
+            </div>
+            <div class="gauge skipped">25%</div>
+          </div>
         </div>
-        <div class="stat">
-          <p class="value" style="color:#d93025;">1</p>
-          <div class="label">签到失败</div>
+        <div class="stat failed">
+          <div class="stat-top">
+            <div>
+              <div class="stat-label">签到失败</div>
+              <div class="stat-value">1</div>
+              <div class="stat-note">1 / 4 账号</div>
+            </div>
+            <div class="gauge failed">25%</div>
+          </div>
         </div>
       </div>
     </div>
 
     <div class="section">
-      <h2>账号状态</h2>
+      <h2 class="section-title">账号明细</h2>
       <div class="cards">
         <div class="card success">
           <div class="row">
             <span class="badge success">✅ 成功</span>
-            <span class="account">账号 1</span>
+            <span class="account">账号 01</span>
           </div>
-          <p class="desc">余额: $120.50, 已用: $30.20 (变化: +$1.00)</p>
+          <p class="desc">余额: $120.50，已用: $30.20，变化: +$1.00</p>
         </div>
 
         <div class="card skipped">
           <div class="row">
             <span class="badge skipped">⏭️ 已签</span>
-            <span class="account">账号 2</span>
+            <span class="account">账号 02</span>
           </div>
-          <p class="desc">余额: $80.00, 已用: $10.00 (今日已签到)</p>
+          <p class="desc">余额: $80.00，已用: $10.00<br><span class="muted">今日已签到</span></p>
         </div>
 
         <div class="card failed">
           <div class="row">
             <span class="badge failed">❌ 失败</span>
-            <span class="account">账号 3</span>
+            <span class="account">账号 03</span>
           </div>
-          <p class="desc"><span class="error">错误: HTTP 403</span></p>
+          <p class="desc">请求返回异常<br><span class="error">错误: HTTP 403</span></p>
         </div>
 
         <div class="card failed">
           <div class="row">
             <span class="badge failed">❌ 失败</span>
-            <span class="account">账号 4</span>
+            <span class="account">账号 04</span>
           </div>
           <p class="desc"><span class="error">异常: Timeout after 30s</span></p>
         </div>
@@ -221,3 +332,4 @@
   </div>
 </body>
 </html>
+
