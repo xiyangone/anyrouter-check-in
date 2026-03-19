@@ -3,6 +3,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 from dotenv import load_dotenv
 
@@ -63,17 +64,25 @@ def test_send_pushplus(mock_client_class):
 	os.environ['PUSHPLUS_TOKEN'] = 'test_token'
 
 	notification_kit = NotificationKit()
+	title = 'test-title'
+	content = 'test-content'
 	mock_response = MagicMock()
 	mock_response.raise_for_status = MagicMock()
 	mock_client = MagicMock()
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
 
-	notification_kit.send_pushplus('测试标题', '测试内容')
+	notification_kit.send_pushplus(title, content)
 
 	mock_client.post.assert_called_once()
-	args = mock_client.post.call_args[1]
-	assert 'test_token' in str(args)
+	args, kwargs = mock_client.post.call_args
+	assert args[0] == 'https://www.pushplus.plus/send'
+	assert kwargs['json'] == {
+		'token': 'test_token',
+		'title': title,
+		'content': content,
+		'template': 'html',
+	}
 
 
 @patch('httpx.Client')

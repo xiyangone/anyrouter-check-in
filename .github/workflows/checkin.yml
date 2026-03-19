@@ -11,13 +11,13 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
-    - uses: astral-sh/setup-uv@v3
+    - uses: astral-sh/setup-uv@v7
       with:
         version: "latest"
 
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v6
       with:
         python-version: '3.11'
 
@@ -35,7 +35,7 @@ jobs:
         echo "Playwright version: $version"
 
     - name: 缓存 Playwright 浏览器
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: playwright-cache
       with:
         path: ~\AppData\Local\ms-playwright
@@ -52,14 +52,14 @@ jobs:
     - name: 执行签到
       env:
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
-        DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+        DINGDING_WEBHOOK: ${{ secrets['DINGDING_WEBHOOK'] || '' }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}
         EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
         EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
-        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-        WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+        PUSHPLUS_TOKEN: ${{ secrets['PUSHPLUS_TOKEN'] || '' }}
+        SERVERPUSHKEY: ${{ secrets['SERVERPUSHKEY'] || '' }}
+        FEISHU_WEBHOOK: ${{ secrets['FEISHU_WEBHOOK'] || '' }}
+        WEIXIN_WEBHOOK: ${{ secrets['WEIXIN_WEBHOOK'] || '' }}
       run: |
         uv run checkin.py
 

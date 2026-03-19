@@ -1,9 +1,9 @@
 import os
 import re
 import smtplib
-from html import unescape
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from html import unescape
 from typing import Callable, Literal
 
 import httpx
@@ -83,7 +83,7 @@ class NotificationKit:
 
 		data = {'token': self.pushplus_token, 'title': title, 'content': content, 'template': 'html'}
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
-			response = client.post('http://www.pushplus.plus/send', json=data)
+			response = client.post('https://www.pushplus.plus/send', json=data)
 			response.raise_for_status()
 		return 'html'
 

@@ -494,12 +494,7 @@ async def do_checkin_request(client: httpx.AsyncClient, headers: dict[str, str],
 		return False, str(e)[:100]
 
 
-async def check_in_account(
-	client: httpx.AsyncClient,
-	account_info: AccountConfig,
-	account_index: int,
-	waf_cookies: dict[str, str] | None
-) -> CheckinResult:
+async def check_in_account(account_info: AccountConfig, account_index: int, waf_cookies: dict[str, str] | None) -> CheckinResult:
 	"""为单个账号执行签到操作（使用预获取的 WAF cookies）"""
 	account_name = f'账号 {account_index + 1}'
 	print(f'\n[处理中] 开始处理 {account_name}')
@@ -527,28 +522,25 @@ async def check_in_account(
 		return CheckinResult(success=False, account_index=account_index, user_info=None, error='WAF cookies 获取失败', balance_before=None, balance_after=None)
 
 	# 合并 cookies
-	all_cookies = {**waf_cookies, **user_cookies}
+	all_cookies = {**user_cookies, **waf_cookies}
 
 	# 构建请求头
 	headers = build_headers(api_user)
 
-	# 设置 cookies
-	for name, value in all_cookies.items():
-		client.cookies.set(name, value, domain='anyrouter.top')
+	async with httpx.AsyncClient(http2=True, timeout=DEFAULT_TIMEOUT, cookies=all_cookies) as client:
+		# 获取签到前的余额
+		balance_before, info_before = await get_user_info(client, headers, account_name)
+		if info_before:
+			print(f'[信息] {account_name}: 签到前 - {info_before}')
 
-	# 获取签到前的余额
-	balance_before, info_before = await get_user_info(client, headers, account_name)
-	if info_before:
-		print(f'[信息] {account_name}: 签到前 - {info_before}')
+		# 执行签到请求
+		print(f'[网络] {account_name}: 执行签到请求')
+		api_success, api_error = await do_checkin_request(client, headers, account_name)
 
-	# 执行签到请求
-	print(f'[网络] {account_name}: 执行签到请求')
-	api_success, api_error = await do_checkin_request(client, headers, account_name)
-
-	# 获取签到后的余额
-	balance_after, info_after = await get_user_info(client, headers, account_name)
-	if info_after:
-		print(f'[信息] {account_name}: 签到后 - {info_after}')
+		# 获取签到后的余额
+		balance_after, info_after = await get_user_info(client, headers, account_name)
+		if info_after:
+			print(f'[信息] {account_name}: 签到后 - {info_after}')
 
 	# 计算实际签到奖励，判断签到是否真正成功
 	# 考虑使用消耗：实际奖励 = 余额变化 + 使用量变化
@@ -590,9 +582,6 @@ async def check_in_account(
 		error_msg = api_error
 		print(f'[失败] {account_name}: 签到失败 - {api_error}')
 
-	# 清除 cookies 以便下一个账号使用
-	client.cookies.clear()
-
 	return CheckinResult(
 		success=actual_success,
 		account_index=account_index,
@@ -620,16 +609,13 @@ async def main():
 	# 步骤1：批量获取所有账号的 WAF cookies（复用浏览器）
 	waf_cookies_list = await get_all_waf_cookies(total_count)
 
-	# 步骤2：使用异步 httpx 客户端并发执行签到
+	# 步骤2：并发执行所有账号的签到，每个账号独立维护自己的 HTTP 会话
 	results: list[CheckinResult | BaseException] = []
-
-	async with httpx.AsyncClient(http2=True, timeout=DEFAULT_TIMEOUT) as client:
-		# 并发执行所有账号的签到
-		tasks = [
-			check_in_account(client, account, i, waf_cookies_list[i])
-			for i, account in enumerate(accounts)
-		]
-		results = await asyncio.gather(*tasks, return_exceptions=True)
+	tasks = [
+		check_in_account(account, i, waf_cookies_list[i])
+		for i, account in enumerate(accounts)
+	]
+	results = await asyncio.gather(*tasks, return_exceptions=True)
 
 	# 处理结果
 	success_count = 0
