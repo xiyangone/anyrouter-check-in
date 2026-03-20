@@ -56,7 +56,7 @@ jobs:
         EMAIL_USER: ${{ secrets.EMAIL_USER }}
         EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
         EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        PUSHPLUS_TOKEN: ${{ secrets['PUSHPLUS_TOKEN'] || '' }}
+        XIZHI_KEY: ${{ secrets['XIZHI_KEY'] || '' }}
         SERVERPUSHKEY: ${{ secrets['SERVERPUSHKEY'] || '' }}
         FEISHU_WEBHOOK: ${{ secrets['FEISHU_WEBHOOK'] || '' }}
         WEIXIN_WEBHOOK: ${{ secrets['WEIXIN_WEBHOOK'] || '' }}

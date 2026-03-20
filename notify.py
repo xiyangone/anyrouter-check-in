@@ -19,7 +19,7 @@ class NotificationKit:
 		self.email_user: str = os.getenv('EMAIL_USER', '')
 		self.email_pass: str = os.getenv('EMAIL_PASS', '')
 		self.email_to: str = os.getenv('EMAIL_TO', '')
-		self.pushplus_token: str | None = os.getenv('PUSHPLUS_TOKEN')
+		self.xizhi_key: str | None = os.getenv('XIZHI_KEY')
 		self.server_push_key: str | None = os.getenv('SERVERPUSHKEY')
 		self.dingding_webhook: str | None = os.getenv('DINGDING_WEBHOOK')
 		self.feishu_webhook: str | None = os.getenv('FEISHU_WEBHOOK')
@@ -76,16 +76,16 @@ class NotificationKit:
 				pass
 		return msg_type
 
-	def send_pushplus(self, title: str, content: str) -> str:
-		"""发送 PushPlus 通知"""
-		if not self.pushplus_token:
-			raise ValueError('未配置 PushPlus Token')
+	def send_xizhi(self, title: str, content: str) -> str:
+		"""发送息知通知（仅支持文本）"""
+		if not self.xizhi_key:
+			raise ValueError('未配置息知 Key')
 
-		data = {'token': self.pushplus_token, 'title': title, 'content': content, 'template': 'html'}
+		data = {'title': title, 'content': content}
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
-			response = client.post('https://www.pushplus.plus/send', json=data)
+			response = client.post(f'https://xizhi.qqoq.net/{self.xizhi_key}.send', json=data)
 			response.raise_for_status()
-		return 'html'
+		return 'text'
 
 	def send_serverPush(self, title: str, content: str) -> str:
 		"""发送 Server酱 通知"""
@@ -160,7 +160,7 @@ class NotificationKit:
 
 		notifications: list[tuple[str, Callable[[], str]]] = [
 			('Email', lambda: self.send_email(title, html_content if msg_type == 'html' else text_content, msg_type)),
-			('PushPlus', lambda: self.send_pushplus(title, html_content)),
+			('Xizhi', lambda: self.send_xizhi(title, text_content)),
 			('Server Push', lambda: self.send_serverPush(title, markdown_content)),
 			('DingTalk', lambda: self.send_dingtalk(title, text_content, 'text')),
 			('Feishu', lambda: self.send_feishu(title, markdown_content, 'markdown')),

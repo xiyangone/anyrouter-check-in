@@ -147,6 +147,13 @@
 
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
 
+说明：
+
+- 已移除 `PushPlus`。根据其官方文档，自 2024-08-01 起发送消息需完成实名认证，且实名认证会产生服务费，或通过付费会员完成，不再适合作为本项目默认低门槛通道。
+- `息知` 仅支持文本消息。
+- `Server 酱` 仍保留免费会员方案，但免费额度较低；若你推送频率不高，可以继续使用。
+- `飞书 / 企业微信 / 钉钉` 走各自官方群机器人 Webhook，基础使用门槛主要是你需要有对应群和机器人配置权限。
+
 ### 邮箱通知
 
 - `EMAIL_USER`: 发件人邮箱地址
@@ -165,9 +172,9 @@
 
 - `WEIXIN_WEBHOOK`: 企业微信机器人的 Webhook 地址
 
-### PushPlus 推送
+### 息知推送（仅文本）
 
-- `PUSHPLUS_TOKEN`: PushPlus 的 Token
+- `XIZHI_KEY`: 息知的专属 Key
 
 ### Server 酱
 
@@ -236,6 +243,8 @@ ANYROUTER_ACCOUNTS=[
 EMAIL_USER=your_email@example.com
 EMAIL_PASS=your_password_or_app_token
 EMAIL_TO=recipient@example.com
+XIZHI_KEY=your_xizhi_key
+SERVERPUSHKEY=your_server_pushkey
 ```
 
 ## 测试

@@ -60,8 +60,8 @@ def test_send_email(mock_smtp_ssl):
 
 
 @patch('httpx.Client')
-def test_send_pushplus(mock_client_class):
-	os.environ['PUSHPLUS_TOKEN'] = 'test_token'
+def test_send_xizhi(mock_client_class):
+	os.environ['XIZHI_KEY'] = 'test_key'
 
 	notification_kit = NotificationKit()
 	title = 'test-title'
@@ -72,16 +72,14 @@ def test_send_pushplus(mock_client_class):
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
 
-	notification_kit.send_pushplus(title, content)
+	notification_kit.send_xizhi(title, content)
 
 	mock_client.post.assert_called_once()
 	args, kwargs = mock_client.post.call_args
-	assert args[0] == 'https://www.pushplus.plus/send'
+	assert args[0] == 'https://xizhi.qqoq.net/test_key.send'
 	assert kwargs['json'] == {
-		'token': 'test_token',
 		'title': title,
 		'content': content,
-		'template': 'html',
 	}
 
 
@@ -162,24 +160,24 @@ def test_missing_config():
 	with pytest.raises(ValueError, match='未配置邮箱信息'):
 		kit.send_email('测试', '测试')
 
-	with pytest.raises(ValueError, match='未配置.*PushPlus.*Token'):
-		kit.send_pushplus('测试', '测试')
+	with pytest.raises(ValueError, match='未配置息知 Key'):
+		kit.send_xizhi('测试', '测试')
 
 
 @patch('notify.NotificationKit.send_email')
 @patch('notify.NotificationKit.send_dingtalk')
 @patch('notify.NotificationKit.send_wecom')
-@patch('notify.NotificationKit.send_pushplus')
+@patch('notify.NotificationKit.send_xizhi')
 @patch('notify.NotificationKit.send_feishu')
 @patch('notify.NotificationKit.send_serverPush')
-def test_push_message(mock_server_push, mock_feishu, mock_pushplus, mock_wecom, mock_dingtalk, mock_email):
+def test_push_message(mock_server_push, mock_feishu, mock_xizhi, mock_wecom, mock_dingtalk, mock_email):
 	# 设置所有通知配置
 	os.environ['EMAIL_USER'] = 'test@example.com'
 	os.environ['EMAIL_PASS'] = 'password'
 	os.environ['EMAIL_TO'] = 'recipient@example.com'
 	os.environ['DINGDING_WEBHOOK'] = 'https://test.com'
 	os.environ['WEIXIN_WEBHOOK'] = 'https://test.com'
-	os.environ['PUSHPLUS_TOKEN'] = 'token'
+	os.environ['XIZHI_KEY'] = 'key'
 	os.environ['FEISHU_WEBHOOK'] = 'https://test.com'
 	os.environ['SERVERPUSHKEY'] = 'key'
 
@@ -189,7 +187,7 @@ def test_push_message(mock_server_push, mock_feishu, mock_pushplus, mock_wecom, 
 	assert mock_email.called
 	assert mock_dingtalk.called
 	assert mock_wecom.called
-	assert mock_pushplus.called
+	assert mock_xizhi.called
 	assert mock_feishu.called
 	assert mock_server_push.called
 	assert mock_dingtalk.call_args[0][2] == 'text'
