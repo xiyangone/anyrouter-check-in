@@ -252,6 +252,80 @@ def build_html_notification(results: list[CheckinResult | BaseException], succes
 		</div>
 	</div>'''
 
+
+def calculate_actual_reward(balance_before: BalanceInfo | None, balance_after: BalanceInfo | None) -> float | None:
+	"""根据签到前后余额与已用额度计算实际奖励。"""
+	if not balance_before or not balance_after:
+		return None
+
+	quota_change = round(balance_after['quota'] - balance_before['quota'], 2)
+	used_change = round(balance_after['used_quota'] - balance_before['used_quota'], 2)
+	return round(quota_change + used_change, 2)
+
+
+def build_plain_text_notification(
+	results: list[CheckinResult | BaseException], success_count: int, skipped_count: int, total_count: int
+) -> str:
+	"""构建适合息知等纯文本通道的结构化通知内容。"""
+	fail_count = total_count - success_count - skipped_count
+
+	if success_count == total_count:
+		overall_status = '✅ 全部账号签到成功'
+	elif success_count + skipped_count == total_count:
+		overall_status = '✅ 全部账号已处理'
+	elif success_count > 0:
+		overall_status = '⚠️ 部分账号签到成功'
+	else:
+		overall_status = '❌ 全部账号签到失败'
+
+	lines = [
+		overall_status,
+		f'时间：{get_beijing_time()}（北京时间）',
+		'',
+		'统计：',
+		f'- 成功：{success_count}/{total_count}',
+		f'- 已签：{skipped_count}/{total_count}',
+		f'- 失败：{fail_count}/{total_count}',
+	]
+
+	detail_blocks: list[str] = []
+
+	for index, result in enumerate(results, start=1):
+		if isinstance(result, BaseException):
+			detail_blocks.append(f'{index}) 账号 {index}｜❌ 处理异常\n   原因：{str(result)[:50]}...')
+			continue
+
+		reward = calculate_actual_reward(result['balance_before'], result['balance_after'])
+		if result['success']:
+			headline = f'{index}) 账号 {index}｜✅ 签到成功'
+		elif result['error'] == '今日已签到':
+			headline = f'{index}) 账号 {index}｜⏭️ 今日已签'
+		else:
+			headline = f'{index}) 账号 {index}｜❌ 签到失败'
+
+		block_lines = [headline]
+
+		if reward is not None and reward > 0:
+			block_lines.append(f'   奖励：+${reward}')
+
+		if result['balance_after']:
+			block_lines.append(
+				f'   余额：${result["balance_after"]["quota"]}｜已用：${result["balance_after"]["used_quota"]}'
+			)
+		elif result['user_info']:
+			block_lines.append(f'   信息：{result["user_info"].replace(chr(10), "｜")}')
+
+		if result['error'] and result['error'] != '今日已签到':
+			block_lines.append(f'   原因：{result["error"]}')
+
+		detail_blocks.append('\n'.join(block_lines))
+
+	sections = ['\n'.join(lines)]
+	if detail_blocks:
+		sections.append('明细：\n' + '\n\n'.join(detail_blocks))
+	return '\n\n'.join(sections)
+
+
 def mask_sensitive(value: str, visible_chars: int = 4) -> str:
 	"""脱敏敏感信息，保留首尾字符"""
 	if not value:
@@ -620,65 +694,18 @@ async def main():
 	# 处理结果
 	success_count = 0
 	skipped_count = 0
-	notification_content = []
-	balance_changes = []
 
 	for i, result in enumerate(results):
 		if isinstance(result, BaseException):
 			print(f'[失败] 账号 {i + 1} 处理异常: {result}')
-			notification_content.append(f'[失败] 账号 {i + 1}: 异常 - {str(result)[:50]}...')
 		else:
 			if result['success']:
 				success_count += 1
-				status = '成功'
 			elif result['error'] == '今日已签到':
 				skipped_count += 1
-				status = '已签'
-			else:
-				status = '失败'
-
-			account_result = f'[{status}] 账号 {i + 1}'
-			if result['user_info']:
-				account_result += f'\n  {result["user_info"]}'
-			if result['error'] and result['error'] != '今日已签到':
-				account_result += f'\n  错误: {result["error"]}'
-			notification_content.append(account_result)
-
-			# 记录余额变化（考虑使用消耗）
-			if result['balance_before'] and result['balance_after']:
-				quota_change = round(result['balance_after']['quota'] - result['balance_before']['quota'], 2)
-				used_change = round(result['balance_after']['used_quota'] - result['balance_before']['used_quota'], 2)
-				actual_reward = round(quota_change + used_change, 2)
-				if actual_reward > 0:
-					balance_changes.append(f'账号 {i + 1}: +${actual_reward}')
-
-	# 构建通知内容
-	summary = [
-		'--- 签到统计 ---',
-		f'签到成功: {success_count}/{total_count}',
-		f'今日已签: {skipped_count}/{total_count}',
-		f'签到失败: {total_count - success_count - skipped_count}/{total_count}',
-	]
-
-	if success_count == total_count:
-		summary.append('状态: 全部账号签到成功！')
-	elif success_count + skipped_count == total_count:
-		summary.append('状态: 全部账号已处理（部分今日已签到）')
-	elif success_count > 0:
-		summary.append('状态: 部分账号签到成功')
-	else:
-		summary.append('状态: 全部账号签到失败')
-
-	# 添加余额变化汇总
-	if balance_changes:
-		summary.append('')
-		summary.append('--- 余额变化 ---')
-		summary.extend(balance_changes)
-
-	time_info = f'执行时间: {get_beijing_time()} (北京时间)'
 
 	# 构建纯文本通知内容（用于控制台输出）
-	notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
+	notify_content = build_plain_text_notification(results, success_count, skipped_count, total_count)
 	print(notify_content)
 
 	# 构建 HTML 通知内容（用于邮件）
@@ -687,7 +714,7 @@ async def main():
 	# 只有签到成功或失败才发送通知，全部已签到则不发送
 	fail_count = total_count - success_count - skipped_count
 	if success_count > 0 or fail_count > 0:
-		notify.push_message('AnyRouter 签到结果', html_content, msg_type='html')
+		notify.push_message('AnyRouter 签到结果', html_content, msg_type='html', text_content=notify_content)
 	else:
 		print('[通知] 全部账号今日已签到，跳过通知发送')
 

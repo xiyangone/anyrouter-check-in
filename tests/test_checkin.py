@@ -119,6 +119,12 @@ def test_main_keeps_other_results_when_one_account_raises():
 		captured['total_count'] = total_count
 		return '<html>ok</html>'
 
+	def fake_build_plain_text_notification(results, success_count, skipped_count, total_count):
+		assert success_count == 1
+		assert skipped_count == 0
+		assert total_count == 2
+		return 'plain-text-ok'
+
 	with (
 		patch(
 			'checkin.load_accounts',
@@ -127,9 +133,11 @@ def test_main_keeps_other_results_when_one_account_raises():
 				{'cookies': {'session': 'session-2'}, 'api_user': 'user-2'},
 			],
 		),
+		patch('checkin.get_beijing_time', return_value='2026-03-29 00:00:00'),
 		patch('checkin.get_all_waf_cookies', fake_get_all_waf_cookies),
 		patch('checkin.check_in_account', fake_check_in_account),
 		patch('checkin.build_html_notification', side_effect=fake_build_html_notification),
+		patch('checkin.build_plain_text_notification', side_effect=fake_build_plain_text_notification),
 		patch.object(checkin.notify, 'push_message') as mock_push_message,
 		patch('checkin.sys.exit') as mock_exit,
 	):
@@ -140,5 +148,41 @@ def test_main_keeps_other_results_when_one_account_raises():
 	assert captured['total_count'] == 2
 	assert isinstance(captured['results'][0], RuntimeError)
 	assert captured['results'][1]['success'] is True
-	mock_push_message.assert_called_once_with('AnyRouter 签到结果', '<html>ok</html>', msg_type='html')
+	mock_push_message.assert_called_once_with('AnyRouter 签到结果', '<html>ok</html>', msg_type='html', text_content='plain-text-ok')
 	mock_exit.assert_called_once_with(0)
+
+
+def test_build_plain_text_notification_highlights_status_stats_and_details():
+	with patch('checkin.get_beijing_time', return_value='2026-03-30 09:54:49'):
+		text = checkin.build_plain_text_notification(
+			[
+				{
+					'success': True,
+					'account_index': 0,
+					'user_info': '余额: $2992.75, 已用: $207.25',
+					'error': None,
+					'balance_before': {'quota': 2967.75, 'used_quota': 207.25},
+					'balance_after': {'quota': 2992.75, 'used_quota': 207.25},
+				}
+			],
+			success_count=1,
+			skipped_count=0,
+			total_count=1,
+		)
+
+	assert text == '\n'.join(
+		[
+			'✅ 全部账号签到成功',
+			'时间：2026-03-30 09:54:49（北京时间）',
+			'',
+			'统计：',
+			'- 成功：1/1',
+			'- 已签：0/1',
+			'- 失败：0/1',
+			'',
+			'明细：',
+			'1) 账号 1｜✅ 签到成功',
+			'   奖励：+$25.0',
+			'   余额：$2992.75｜已用：$207.25',
+		]
+	)

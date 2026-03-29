@@ -152,19 +152,27 @@ class NotificationKit:
 			response.raise_for_status()
 		return msg_format
 
-	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> None:
+	def push_message(
+		self,
+		title: str,
+		content: str,
+		msg_type: Literal['text', 'html'] = 'text',
+		text_content: str | None = None,
+	) -> None:
 		"""推送消息到所有已配置的通知渠道"""
 		html_content = content if msg_type == 'html' else content.replace('\n', '<br>')
-		text_content = self._html_to_text(content) if msg_type == 'html' else content
-		markdown_content = text_content
+		plain_text_content = text_content.strip() if text_content and text_content.strip() else (
+			self._html_to_text(content) if msg_type == 'html' else content
+		)
+		markdown_content = plain_text_content
 
 		notifications: list[tuple[str, Callable[[], str]]] = [
-			('Email', lambda: self.send_email(title, html_content if msg_type == 'html' else text_content, msg_type)),
-			('Xizhi', lambda: self.send_xizhi(title, text_content)),
+			('Email', lambda: self.send_email(title, html_content if msg_type == 'html' else plain_text_content, msg_type)),
+			('Xizhi', lambda: self.send_xizhi(title, plain_text_content)),
 			('Server Push', lambda: self.send_serverPush(title, markdown_content)),
-			('DingTalk', lambda: self.send_dingtalk(title, text_content, 'text')),
+			('DingTalk', lambda: self.send_dingtalk(title, plain_text_content, 'text')),
 			('Feishu', lambda: self.send_feishu(title, markdown_content, 'markdown')),
-			('WeChat Work', lambda: self.send_wecom(title, text_content, 'text')),
+			('WeChat Work', lambda: self.send_wecom(title, plain_text_content, 'text')),
 		]
 
 		success_count = 0

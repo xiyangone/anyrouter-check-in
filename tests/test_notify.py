@@ -195,6 +195,37 @@ def test_push_message(mock_server_push, mock_feishu, mock_xizhi, mock_wecom, moc
 	assert mock_feishu.call_args[0][2] == 'markdown'
 
 
+@patch('notify.NotificationKit.send_email')
+@patch('notify.NotificationKit.send_dingtalk')
+@patch('notify.NotificationKit.send_wecom')
+@patch('notify.NotificationKit.send_xizhi')
+@patch('notify.NotificationKit.send_feishu')
+@patch('notify.NotificationKit.send_serverPush')
+def test_push_message_prefers_explicit_plain_text_for_non_html_channels(
+	mock_server_push, mock_feishu, mock_xizhi, mock_wecom, mock_dingtalk, mock_email
+):
+	os.environ['EMAIL_USER'] = 'test@example.com'
+	os.environ['EMAIL_PASS'] = 'password'
+	os.environ['EMAIL_TO'] = 'recipient@example.com'
+	os.environ['DINGDING_WEBHOOK'] = 'https://test.com'
+	os.environ['WEIXIN_WEBHOOK'] = 'https://test.com'
+	os.environ['XIZHI_KEY'] = 'key'
+	os.environ['FEISHU_WEBHOOK'] = 'https://test.com'
+	os.environ['SERVERPUSHKEY'] = 'key'
+
+	notification_kit = NotificationKit()
+	html_content = '<div><h1>签到结果通知</h1><p>这是 HTML 内容</p></div>'
+	plain_text = '执行时间: 2026-03-29 00:00:00 (北京时间)\n\n[成功] 账号 1'
+	notification_kit.push_message('测试标题', html_content, msg_type='html', text_content=plain_text)
+
+	assert mock_email.call_args.args == ('测试标题', html_content, 'html')
+	assert mock_xizhi.call_args.args == ('测试标题', plain_text)
+	assert mock_server_push.call_args.args == ('测试标题', plain_text)
+	assert mock_dingtalk.call_args.args == ('测试标题', plain_text, 'text')
+	assert mock_feishu.call_args.args == ('测试标题', plain_text, 'markdown')
+	assert mock_wecom.call_args.args == ('测试标题', plain_text, 'text')
+
+
 def test_html_to_text_conversion():
 	content = '<h1>标题</h1><p>第一行<br>第二行</p>'
 	text = NotificationKit._html_to_text(content)
