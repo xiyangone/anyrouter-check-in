@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -18,8 +19,6 @@ from playwright.async_api import Browser, async_playwright
 
 from notify import notify
 
-load_dotenv()
-
 # ============ 配置常量 ============
 ANYROUTER_BASE_URL = 'https://anyrouter.top'
 BEIJING_TZ = timezone(timedelta(hours=8))  # 北京时区 UTC+8
@@ -30,8 +29,9 @@ RETRY_BASE_DELAY = 1.0
 # WAF cookies 缓存配置
 WAF_CACHE_FILE = Path('.waf_cache.json')
 WAF_CACHE_TTL = timedelta(hours=2)  # 缓存有效期 2 小时
+QUOTA_PER_UNIT = 500000  # new-api/one-api 内部单位：1 USD = 500000
 
-DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
 
 
 # ============ 类型定义 ============
@@ -68,6 +68,9 @@ def load_waf_cache() -> dict[str, str] | None:
 	try:
 		cache_data = json.loads(WAF_CACHE_FILE.read_text(encoding='utf-8'))
 		cached_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
+		# 统一时区：fromisoformat 可能返回 naive datetime，与 aware datetime 相减会抛 TypeError
+		if cached_time.tzinfo is None:
+			cached_time = cached_time.replace(tzinfo=BEIJING_TZ)
 		cookies = cache_data.get('cookies', {})
 
 		# 检查缓存是否过期
@@ -341,7 +344,7 @@ async def retry_async(coro_func, max_retries: int = MAX_RETRIES, base_delay: flo
 	for attempt in range(max_retries):
 		try:
 			return await coro_func()
-		except (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout) as e:
+		except httpx.HTTPError as e:
 			last_exception = e
 			if attempt < max_retries - 1:
 				delay = base_delay * (2 ** attempt)
@@ -394,7 +397,40 @@ def parse_cookies(cookies_data):
 				key, value = cookie.strip().split('=', 1)
 				cookies_dict[key] = value
 		return cookies_dict
+	print(f'[警告] cookies 数据类型无效 ({type(cookies_data).__name__})，期望 dict 或 str')
 	return {}
+
+async def precheck_account(account_info: AccountConfig, account_index: int) -> tuple[bool, str | None]:
+	"""预检账号状态：验证 session 有效性，无需 WAF cookies。
+	返回 (session_valid, error_msg)"""
+	account_name = f'账号 {account_index + 1}'
+	api_user = account_info.get('api_user', '')
+	if not api_user:
+		return False, '缺少 api_user'
+
+	user_cookies = parse_cookies(account_info.get('cookies', {}))
+	if not user_cookies:
+		return False, 'cookies 格式无效'
+
+	headers = build_headers(api_user)
+	try:
+		async with httpx.AsyncClient(http2=True, timeout=DEFAULT_TIMEOUT, cookies=user_cookies) as client:
+			response = await client.get(f'{ANYROUTER_BASE_URL}/api/user/self', headers=headers, timeout=DEFAULT_TIMEOUT)
+			if response.status_code == 401:
+				print(f'[预检] {account_name}: session 已过期 (HTTP 401)，请更新 cookies')
+				return False, 'session 已过期 (HTTP 401)，请更新 cookies'
+			if response.status_code == 200:
+				data = response.json()
+				if data.get('success'):
+					print(f'[预检] {account_name}: session 有效')
+					return True, None
+				return False, data.get('message', '未知错误')
+			return False, f'HTTP {response.status_code}'
+	except Exception as e:
+		print(f'[预检] {account_name}: 预检请求失败 - {str(e)[:50]}')
+		# 预检失败不阻断，仍尝试后续流程
+		return True, None
+
 
 
 async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[str, str] | None:
@@ -408,6 +444,7 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 
 	try:
 		print(f'[处理中] {account_name}: 访问登录页获取 WAF cookies...')
+		start_time = time.monotonic()
 
 		await page.goto(f'{ANYROUTER_BASE_URL}/login', wait_until='networkidle', timeout=DEFAULT_TIMEOUT * 1000)
 
@@ -434,6 +471,8 @@ async def get_single_waf_cookies(browser: Browser, account_name: str) -> dict[st
 			return None
 
 		print(f'[成功] {account_name}: 成功获取所有 WAF cookies')
+		elapsed = time.monotonic() - start_time
+		print(f'[耗时] {account_name}: WAF cookies 获取耗时 {elapsed:.1f}s')
 		return waf_cookies
 
 	except Exception as e:
@@ -458,14 +497,14 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 
 	# 步骤2: 缓存未命中，启动浏览器获取
 	print(f'[系统] 启动浏览器为 {account_count} 个账号获取 WAF cookies...')
+	waf_start_time = time.monotonic()
 
 	async with async_playwright() as p:
 		browser = await p.chromium.launch(
-			headless=False,
+			headless=True,
 			args=[
 				'--disable-blink-features=AutomationControlled',
 				'--disable-dev-shm-usage',
-				'--disable-web-security',
 				'--disable-features=VizDisplayCompositor',
 				'--no-sandbox',
 			],
@@ -499,6 +538,8 @@ async def get_all_waf_cookies(account_count: int) -> list[dict[str, str] | None]
 
 	success_count = sum(1 for c in waf_cookies_list if c)
 	print(f'[系统] 浏览器已关闭。成功获取 {success_count} 个账号的 WAF cookies')
+	waf_elapsed = time.monotonic() - waf_start_time
+	print(f'[耗时] WAF cookies 总耗时 {waf_elapsed:.1f}s')
 	return waf_cookies_list
 
 
@@ -511,8 +552,8 @@ async def get_user_info(client: httpx.AsyncClient, headers: dict[str, str], acco
 			data = response.json()
 			if data.get('success'):
 				user_data = data.get('data', {})
-				quota = round(user_data.get('quota', 0) / 500000, 2)
-				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+				quota = round(user_data.get('quota', 0) / QUOTA_PER_UNIT, 2)
+				used_quota = round(user_data.get('used_quota', 0) / QUOTA_PER_UNIT, 2)
 				balance_info = BalanceInfo(quota=quota, used_quota=used_quota)
 				info_str = f'余额: ${quota}, 已用: ${used_quota}'
 				return balance_info, info_str
@@ -563,6 +604,8 @@ async def do_checkin_request(client: httpx.AsyncClient, headers: dict[str, str],
 					return True, None
 				return False, '响应格式无效'
 		else:
+			if response.status_code == 401:
+				return False, 'session 已过期 (HTTP 401)，请更新 cookies'
 			return False, f'HTTP {response.status_code}'
 	except Exception as e:
 		return False, str(e)[:100]
@@ -617,35 +660,28 @@ async def check_in_account(account_info: AccountConfig, account_index: int, waf_
 			print(f'[信息] {account_name}: 签到后 - {info_after}')
 
 	# 计算实际签到奖励，判断签到是否真正成功
-	# 考虑使用消耗：实际奖励 = 余额变化 + 使用量变化
 	user_info = info_after or info_before
-	actual_reward = 0.0
+	actual_reward = calculate_actual_reward(balance_before, balance_after)
 	actual_success = False
 	error_msg = None
 
-	if balance_before and balance_after:
-		quota_change = round(balance_after['quota'] - balance_before['quota'], 2)
-		used_change = round(balance_after['used_quota'] - balance_before['used_quota'], 2)
-		# 实际签到奖励 = 余额变化 + 使用量变化（使用会导致余额减少但used增加）
-		actual_reward = round(quota_change + used_change, 2)
-
-		if actual_reward > 0:
-			# 签到成功（即使同时有使用消耗）
-			actual_success = True
-			change_str = f'+${actual_reward}'
-			print(f'[成功] {account_name}: 签到成功！余额变化: {change_str}')
-			user_info = f"{info_after} (变化: {change_str})"
-		elif api_success:
-			# API 返回成功但实际奖励为0，说明今天已经签到过了
-			actual_success = False
-			error_msg = '今日已签到'
-			print(f'[跳过] {account_name}: 今日已签到，余额无变化')
-			user_info = f"{info_after} (今日已签到)"
-		else:
-			# API 返回失败
-			actual_success = False
-			error_msg = api_error
-			print(f'[失败] {account_name}: 签到失败 - {api_error}')
+	if actual_reward is not None and actual_reward > 0:
+		# 签到成功（即使同时有使用消耗）
+		actual_success = True
+		change_str = f'+${actual_reward}'
+		print(f'[成功] {account_name}: 签到成功！余额变化: {change_str}')
+		user_info = f"{info_after} (变化: {change_str})"
+	elif actual_reward is not None and actual_reward <= 0 and api_success:
+		# API 返回成功但实际奖励为0，说明今天已经签到过了
+		actual_success = False
+		error_msg = '今日已签到'
+		print(f'[跳过] {account_name}: 今日已签到，余额无变化')
+		user_info = f"{info_after} (今日已签到)"
+	elif actual_reward is not None and actual_reward <= 0:
+		# 余额有数据但无变化且 API 失败
+		actual_success = False
+		error_msg = api_error
+		print(f'[失败] {account_name}: 签到失败 - {api_error}')
 	elif api_success:
 		# 无法获取余额信息，但 API 返回成功
 		actual_success = True
@@ -668,6 +704,7 @@ async def check_in_account(account_info: AccountConfig, account_index: int, waf_
 
 async def main():
 	"""主函数"""
+	load_dotenv()
 	print('[系统] AnyRouter.top 多账号自动签到脚本启动（优化版）')
 	print(f'[时间] 执行时间: {get_beijing_time()} (北京时间)')
 
@@ -680,16 +717,67 @@ async def main():
 	total_count = len(accounts)
 	print(f'[信息] 发现 {total_count} 个账号配置')
 
-	# 步骤1：批量获取所有账号的 WAF cookies（复用浏览器）
-	waf_cookies_list = await get_all_waf_cookies(total_count)
+	# 步骤1：预检所有账号 session 有效性（无需 WAF cookies）
+	print('[系统] 预检账号 session 有效性...')
+	precheck_tasks = [precheck_account(account, i) for i, account in enumerate(accounts)]
+	precheck_results = await asyncio.gather(*precheck_tasks, return_exceptions=True)
 
-	# 步骤2：并发执行所有账号的签到，每个账号独立维护自己的 HTTP 会话
-	results: list[CheckinResult | BaseException] = []
-	tasks = [
-		check_in_account(account, i, waf_cookies_list[i])
-		for i, account in enumerate(accounts)
+	# 分离预检失败和通过的账号
+	failed_indices: list[int] = []
+	valid_indices: list[int] = []
+	for i, result in enumerate(precheck_results):
+		if isinstance(result, BaseException):
+			print(f'[预检] 账号 {i + 1}: 异常 - {result}')
+			failed_indices.append(i)
+		elif not result[0]:
+			failed_indices.append(i)
+		else:
+			valid_indices.append(i)
+
+	if not valid_indices:
+		print('[失败] 所有账号预检不通过（session 过期或配置错误），程序退出')
+		results: list[CheckinResult | BaseException] = []
+		for i in range(total_count):
+			pr = precheck_results[i]
+			if isinstance(pr, BaseException):
+				results.append(pr)
+			else:
+				results.append(CheckinResult(
+					success=False, account_index=i, user_info=None,
+					error=pr[1], balance_before=None, balance_after=None,
+				))
+		notify_content = build_plain_text_notification(results, 0, 0, total_count)
+		print(notify_content)
+		html_content = build_html_notification(results, 0, 0, total_count)
+		notify.push_message('AnyRouter 签到结果', html_content, msg_type='html', text_content=notify_content)
+		sys.exit(1)
+
+	# 步骤2：仅为有效账号获取 WAF cookies
+	valid_accounts = [accounts[i] for i in valid_indices]
+	waf_cookies_list = await get_all_waf_cookies(len(valid_accounts))
+
+	# 步骤3：并发执行有效账号的签到
+	signin_tasks = [
+		check_in_account(valid_accounts[vi], valid_indices[vi], waf_cookies_list[vi])
+		for vi in range(len(valid_indices))
 	]
-	results = await asyncio.gather(*tasks, return_exceptions=True)
+	signin_results = await asyncio.gather(*signin_tasks, return_exceptions=True)
+
+	# 合并结果：预检失败的 + 签到结果的
+	results: list[CheckinResult | BaseException] = []
+	for i in range(total_count):
+		if i in failed_indices:
+			pr = precheck_results[i]
+			if isinstance(pr, BaseException):
+				results.append(pr)
+			else:
+				results.append(CheckinResult(
+					success=False, account_index=i, user_info=None,
+					error=pr[1], balance_before=None, balance_after=None,
+				))
+		else:
+			vi_idx = valid_indices.index(i)
+			results.append(signin_results[vi_idx])
 
 	# 处理结果
 	success_count = 0
