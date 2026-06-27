@@ -1,0 +1,60 @@
+name: Keep scheduled workflows active
+
+on:
+  schedule:
+    # Keep the repository active well before GitHub's 60-day scheduled workflow cutoff.
+    - cron: '17 3 15 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      EMAIL_USER: ${{ secrets.EMAIL_USER }}
+      EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create keepalive commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep scheduled workflows active"
+          git push
+
+      - name: Send keepalive email
+        if: ${{ env.EMAIL_USER != '' && env.EMAIL_PASS != '' && env.EMAIL_TO != '' }}
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          from datetime import datetime, timezone, timedelta
+          from email.message import EmailMessage
+
+          beijing_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+          repo = os.environ.get('GITHUB_REPOSITORY', 'unknown/repository')
+          run_id = os.environ.get('GITHUB_RUN_ID', '')
+          run_url = f'https://github.com/{repo}/actions/runs/{run_id}' if run_id else ''
+
+          message = EmailMessage()
+          message['From'] = f'AnyRouter Keepalive <{os.environ["EMAIL_USER"]}>'
+          message['To'] = os.environ['EMAIL_TO']
+          message['Subject'] = 'AnyRouter workflow 保活已执行'
+          message.set_content(
+              f'AnyRouter workflow 保活已执行。\n\n'
+              f'仓库: {repo}\n'
+              f'时间: {beijing_time} 北京时间\n'
+              f'运行: {run_url}\n\n'
+              f'本次操作创建了一个空提交，用于避免 GitHub scheduled workflow 因 60 天仓库无活动被自动停用。\n'
+          )
+
+          smtp_server = f'smtp.{os.environ["EMAIL_USER"].split("@", 1)[1]}'
+          with smtplib.SMTP_SSL(smtp_server, 465, timeout=30) as server:
+              server.login(os.environ['EMAIL_USER'], os.environ['EMAIL_PASS'])
+              server.send_message(message)
+          PY
