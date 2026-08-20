@@ -14,8 +14,8 @@
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 Cloudflare WAF 限制
 - ✅ 智能重试机制（3 次，指数退避）
-- ✅ 紫蓝工作台风格 HTML 邮件通知，展示平台、账号与统计结果
-- ✅ 失败始终通知，成功与「今日已签」各由独立 GitHub Variable 控制
+- ✅ 紫蓝玻璃态工作台风格 HTML 邮件通知，展示平台、账号与统计结果
+- ✅ 单一 `NOTIFY_ONCE` 开关控制通知去重，默认每轮推送，开启后成功结果每天只推送一次
 - ✅ 北京时区支持
 
 ## 技术栈
@@ -70,10 +70,10 @@ AgentRouter（https://agentrouter.org/）直接配置登录邮箱和密码，不
 5. 点击 "Add environment secret"，按需创建：
    - `ANYROUTER_ACCOUNTS`: AnyRouter 多账号 JSON
    - `AGENTROUTER_ACCOUNTS`: AgentRouter 多账号 JSON
-6. 在 Environment variables 中添加通知开关（都是可选，默认 `false`）：
-   - `NOTIFY_ON_SUCCESS`: `true` 时推送签到成功
-   - `NOTIFY_ON_SKIPPED`: `true` 时推送今日已签
-   - 失败始终推送，与这两个开关无关
+6. 在 Environment variables 中添加通知开关（可选，默认 `false`）：
+   - `NOTIFY_ONCE=false`：每轮完整推送，便于观察两个平台的实际状态
+   - `NOTIFY_ONCE=true`：每个账号当天的签到成功只推送一次；后续运行自动隐藏已成功账号
+   - 失败始终推送，不会被去重
 
 ### 4. 多账号配置格式
 
@@ -190,15 +190,15 @@ AgentRouter（https://agentrouter.org/）直接配置登录邮箱和密码，不
 
 说明：
 
-- 失败**始终**推送，不受任何开关影响。
-- `NOTIFY_ON_SUCCESS` 与 `NOTIFY_ON_SKIPPED` 是两个独立开关，都在 GitHub Variables 里改，无需修改代码：
+- 失败**始终**推送，不受开关影响。
+- 只保留一个 `NOTIFY_ONCE` 开关，在 GitHub Variables 里改，无需修改代码：
 
-| `NOTIFY_ON_SUCCESS` | `NOTIFY_ON_SKIPPED` | 效果 |
-| ------------------- | ------------------- | ---- |
-| `false` | `false` | 默认，只有失败才推送 |
-| `true` | `false` | 有成功签到时推送；全部「今日已签」时不推 |
-| `false` | `true` | 「今日已签」时推送；纯成功时不推 |
-| `true` | `true` | 每次执行都推送 |
+| `NOTIFY_ONCE` | 效果 |
+| ------------- | ---- |
+| `false` | 默认，每轮执行都完整推送所有账号结果，便于观察 |
+| `true` | 成功结果按账号每天只推送一次；失败始终推送；已成功账号不在后续邮件重复出现 |
+
+`NOTIFY_ONCE=true` 时，如果本轮某个平台刚签到成功，邮件会显示这个成功结果；其他尚未产生新签到奖励、且当天还没有成功推送记录的账号会标记为「未到时间」。后续另一个平台签到成功时，前面已经成功过的平台不会再次显示。GitHub Actions 会用北京时间日期缓存当天状态，第二天自动重新开始记录。
 
 - 已移除 `PushPlus`。根据其官方文档，自 2024-08-01 起发送消息需完成实名认证，且实名认证会产生服务费，或通过付费会员完成，不再适合作为本项目默认低门槛通道。
 - `息知` 仅支持文本消息。
@@ -293,9 +293,8 @@ ANYROUTER_ACCOUNTS=[{"cookies":{"session":"your_session_value"},"api_user":"your
 # AgentRouter（可选，单行 JSON）
 AGENTROUTER_ACCOUNTS=[{"email":"user@example.com","password":"your_password"}]
 
-# 通知开关：失败始终通知，下面两项各自独立
-NOTIFY_ON_SUCCESS=false
-NOTIFY_ON_SKIPPED=false
+# 通知去重：false（默认）每轮完整推送；true 时成功结果每天只推送一次
+NOTIFY_ONCE=false
 
 # 通知配置（可选）
 EMAIL_USER=your_email@example.com
@@ -337,7 +336,7 @@ uv run pytest tests/ --cov=. --cov-report=term-missing
 - ✨ 新增 AgentRouter 邮箱 + 密码多账号签到，与 AnyRouter 可单独或同时启用
 - ✨ AgentRouter 使用 `type=4` 系统日志核验实际到账，规避站点重复提示导致的误报
 - ✨ AnyRouter 与 AgentRouter 共用 GitHub Actions、通知统计与新版 HTML 邮件 UI
-- ✨ 新增 `NOTIFY_ON_SUCCESS` 与 `NOTIFY_ON_SKIPPED` 两个独立 GitHub Variable，成功与「今日已签」推送均无需改代码
+- 🔧 通知配置收敛为单一 `NOTIFY_ONCE` 开关，支持每天按账号去重并隐藏已成功平台
 - 🐛 修复 AgentRouter 单账号异常会打掉整轮签到并导致完全不发通知的问题
 - 🐛 修复 `name` 写成非字符串时抛 `AttributeError`，以及日志把自定义名称当邮箱打印的问题
 - 🔧 依赖升级并锁定（playwright 1.62.0、httpx 0.28.1、python-dotenv 1.2.3、ruff 0.16.3 等），修复 `h2`/`idna`/`python-dotenv` 已知漏洞

@@ -164,47 +164,28 @@ def test_missing_config():
 		kit.send_xizhi('测试', '测试')
 
 
-def test_checkin_notification_policy_defaults_to_failures_only():
-	kit = NotificationKit()
-
-	assert kit.should_send_checkin(success_count=1, skipped_count=1, total_count=2) is False
-	assert kit.should_send_checkin(success_count=1, skipped_count=0, total_count=2) is True
-
-
-def test_checkin_notification_policy_can_enable_success(monkeypatch):
-	monkeypatch.setenv('NOTIFY_ON_SUCCESS', 'true')
+def test_checkin_notification_policy_defaults_to_every_run():
 	kit = NotificationKit()
 
 	assert kit.should_send_checkin(success_count=1, skipped_count=1, total_count=2) is True
+	assert kit.should_send_checkin(success_count=1, skipped_count=0, total_count=2) is True
 
 
-def test_notify_on_success_does_not_push_pure_skipped(monkeypatch):
-	"""NOTIFY_ON_SUCCESS 只管成功；全部今日已签时不应被它带出推送。"""
-	monkeypatch.setenv('NOTIFY_ON_SUCCESS', 'true')
-	monkeypatch.setenv('NOTIFY_ON_SKIPPED', 'false')
+def test_notify_once_suppresses_passive_results(monkeypatch):
+	monkeypatch.setenv('NOTIFY_ONCE', 'true')
 	kit = NotificationKit()
 
 	assert kit.should_send_checkin(success_count=0, skipped_count=2, total_count=2) is False
-
-
-def test_notify_on_skipped_pushes_only_skipped(monkeypatch):
-	"""NOTIFY_ON_SKIPPED 独立开关：只推今日已签，不因此推纯成功。"""
-	monkeypatch.setenv('NOTIFY_ON_SUCCESS', 'false')
-	monkeypatch.setenv('NOTIFY_ON_SKIPPED', 'true')
-	kit = NotificationKit()
-
-	assert kit.should_send_checkin(success_count=0, skipped_count=2, total_count=2) is True
-	assert kit.should_send_checkin(success_count=2, skipped_count=0, total_count=2) is False
-	# 失败始终通知，与两个开关无关
+	assert kit.should_send_checkin(success_count=2, skipped_count=0, total_count=2) is True
 	assert kit.should_send_checkin(success_count=0, skipped_count=0, total_count=1) is True
 
 
-def test_notify_switches_accept_github_variable_strings(monkeypatch):
+def test_notify_switch_accepts_github_variable_strings(monkeypatch):
 	"""GitHub Variable 传入的是字符串，需正确解析 true/false 两种取值。"""
 	for raw, expected in (('true', True), ('True', True), ('false', False), ('', False)):
-		monkeypatch.setenv('NOTIFY_ON_SKIPPED', raw)
+		monkeypatch.setenv('NOTIFY_ONCE', raw)
 		kit = NotificationKit()
-		assert kit.should_send_checkin(success_count=0, skipped_count=1, total_count=1) is expected, raw
+		assert kit.notify_once_enabled() is expected, raw
 
 
 @patch('notify.NotificationKit.send_email')

@@ -203,6 +203,64 @@ def test_agentrouter_login_uses_latest_local_or_server_timestamp():
 	assert checkin.get_agentrouter_login_reference_time(200, 'invalid') == 200
 
 
+def test_prepare_agentrouter_login_form_waits_for_delayed_spa_render(monkeypatch):
+	"""SPA 延迟挂载邮箱入口时，不应在首轮探测后立即失败。"""
+
+	class FakeLocator:
+		def __init__(self, *, visible=None, visible_after=0):
+			self.visible = visible or (lambda: True)
+			self.visible_after = visible_after
+			self.probes = 0
+			self.clicked = False
+
+		@property
+		def first(self):
+			return self
+
+		async def count(self):
+			self.probes += 1
+			return int(self.probes > self.visible_after)
+
+		async def is_visible(self):
+			return self.visible()
+
+		async def click(self):
+			self.clicked = True
+
+	class FakePage:
+		def __init__(self):
+			self.email_button = FakeLocator(visible_after=2)
+			self.username = FakeLocator(visible=lambda: self.email_button.clicked)
+			self.password = FakeLocator(visible=lambda: self.email_button.clicked)
+			self.submit = FakeLocator(visible=lambda: self.email_button.clicked)
+			self.missing = FakeLocator(visible=lambda: False)
+
+		def locator(self, selector):
+			return {
+				'#username': self.username,
+				'#password': self.password,
+				'form.semi-form button[type="submit"]': self.submit,
+			}.get(selector, self.missing)
+
+		def get_by_role(self, role, name):
+			if role == 'button' and name.pattern.startswith('使用'):
+				return self.email_button
+			return self.missing
+
+	async def no_wait():
+		return None
+
+	page = FakePage()
+	monkeypatch.setattr(checkin, 'page_wait_interval', no_wait)
+	username, password, submit = run_async(checkin.prepare_agentrouter_login_form(cast(Any, page)))
+
+	assert page.email_button.probes == 3
+	assert page.email_button.clicked is True
+	assert username is page.username
+	assert password is page.password
+	assert submit is page.submit
+
+
 def test_main_combines_both_providers_and_respects_notify_policy():
 	captured: dict[str, Any] = {}
 
@@ -236,16 +294,18 @@ def test_main_combines_both_providers_and_respects_notify_policy():
 			}
 		]
 
-	def fake_build_html_notification(results, success_count, skipped_count, total_count):
+	def fake_build_html_notification(results, success_count, skipped_count, waiting_count, total_count):
 		captured['results'] = results
 		captured['success_count'] = success_count
 		captured['skipped_count'] = skipped_count
+		captured['waiting_count'] = waiting_count
 		captured['total_count'] = total_count
 		return '<html>ok</html>'
 
-	def fake_build_plain_text_notification(results, success_count, skipped_count, total_count):
+	def fake_build_plain_text_notification(results, success_count, skipped_count, waiting_count, total_count):
 		assert success_count == 1
 		assert skipped_count == 1
+		assert waiting_count == 0
 		assert total_count == 2
 		return 'plain-text-ok'
 
@@ -263,6 +323,9 @@ def test_main_combines_both_providers_and_respects_notify_policy():
 		patch('checkin.run_agentrouter_checkins', fake_run_agentrouter_checkins),
 		patch('checkin.build_html_notification', side_effect=fake_build_html_notification),
 		patch('checkin.build_plain_text_notification', side_effect=fake_build_plain_text_notification),
+		patch('checkin.load_notification_state', return_value={'date': '2026-03-29', 'notified_successes': []}),
+		patch('checkin.save_notification_state'),
+		patch.object(checkin.notify, 'notify_once_enabled', return_value=False),
 		patch.object(checkin.notify, 'should_send_checkin', return_value=False) as mock_should_send,
 		patch.object(checkin.notify, 'push_message') as mock_push_message,
 		patch('checkin.sys.exit') as mock_exit,
@@ -271,6 +334,7 @@ def test_main_combines_both_providers_and_respects_notify_policy():
 
 	assert captured['success_count'] == 1
 	assert captured['skipped_count'] == 1
+	assert captured['waiting_count'] == 0
 	assert captured['total_count'] == 2
 	assert captured['results'][0]['provider'] == 'AnyRouter'
 	assert captured['results'][1]['provider'] == 'AgentRouter'
@@ -294,6 +358,7 @@ def test_build_plain_text_notification_highlights_status_stats_and_details():
 			],
 			success_count=1,
 			skipped_count=0,
+			waiting_count=0,
 			total_count=1,
 		)
 
@@ -305,6 +370,7 @@ def test_build_plain_text_notification_highlights_status_stats_and_details():
 			'统计：',
 			'- 成功：1/1',
 			'- 已签：0/1',
+			'- 等待：0/1',
 			'- 失败：0/1',
 			'',
 			'明细：',
@@ -313,6 +379,90 @@ def test_build_plain_text_notification_highlights_status_stats_and_details():
 			'   余额：$2992.75｜已用：$207.25',
 		]
 	)
+
+
+def test_build_html_notification_uses_glass_fallback_and_responsive_layout():
+	with patch('checkin.get_beijing_time', return_value='2026-08-21 02:00:00'):
+		html = checkin.build_html_notification(
+			[
+				checkin.make_result(
+					success=False,
+					account_index=0,
+					provider='AgentRouter',
+					account_name='Agent 主账号',
+					error='今日已签到',
+				),
+			],
+			success_count=0,
+			skipped_count=1,
+			waiting_count=0,
+			total_count=1,
+		)
+
+	assert 'background-image: radial-gradient' in html
+	assert 'background: #f8fafc; background: rgba(255,255,255,.68)' in html
+	assert 'backdrop-filter: blur(20px) saturate(1.45)' in html
+	assert 'box-shadow: 0 24px 60px rgba(15,23,42,.12)' in html
+	assert '@media only screen and (max-width: 560px)' in html
+	assert 'class="stat-cell"' in html
+	assert 'AgentRouter' in html
+	assert '今日已签' in html
+
+
+def test_notify_once_shows_waiting_then_hides_previously_successful_provider():
+	agent_success = checkin.make_result(
+		success=True,
+		account_index=0,
+		provider='AgentRouter',
+		account_name='Agent 主账号',
+		account_key='agent-key',
+	)
+	any_skipped = checkin.make_result(
+		success=False,
+		account_index=0,
+		provider='AnyRouter',
+		account_name='Any 主账号',
+		account_key='any-key',
+		error='今日已签到',
+	)
+
+	first_results, first_successes = checkin.build_notification_results(
+		[agent_success, any_skipped],
+		{'date': '2026-08-21', 'notified_successes': []},
+		notify_once=True,
+	)
+
+	assert [checkin.get_result_status(result) for result in first_results] == ['success', 'waiting']
+	assert first_successes == ['agent-key']
+	assert checkin.build_notification_title(first_results) == 'AgentRouter 签到成功'
+
+	any_success = checkin.make_result(
+		success=True,
+		account_index=0,
+		provider='AnyRouter',
+		account_name='Any 主账号',
+		account_key='any-key',
+	)
+	agent_skipped = checkin.make_result(
+		success=False,
+		account_index=0,
+		provider='AgentRouter',
+		account_name='Agent 主账号',
+		account_key='agent-key',
+		error='今日已签到',
+	)
+
+	second_results, second_successes = checkin.build_notification_results(
+		[agent_skipped, any_success],
+		{'date': '2026-08-21', 'notified_successes': ['agent-key']},
+		notify_once=True,
+	)
+
+	assert len(second_results) == 1
+	assert not isinstance(second_results[0], BaseException)
+	assert second_results[0].get('provider') == 'AnyRouter'
+	assert second_successes == ['any-key']
+	assert checkin.build_notification_title(second_results) == 'AnyRouter 签到成功'
 
 
 def assert_dotenv_accounts_are_loadable(env_path: Path) -> set[str]:

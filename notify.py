@@ -37,15 +37,17 @@ class NotificationKit:
 		return value.strip().lower() in {'1', 'true', 'yes', 'on', 'y'}
 
 	def should_send_checkin(self, success_count: int, skipped_count: int, total_count: int) -> bool:
-		"""失败始终通知；成功与今日已签各自由独立开关控制。"""
+		"""默认每轮推送；NOTIFY_ONCE=true 时仅推送新成功或失败。"""
 		fail_count = max(total_count - success_count - skipped_count, 0)
-		if fail_count > 0:
+		if total_count <= 0:
+			return False
+		if not self.notify_once_enabled():
 			return True
-		if success_count > 0 and self._env_flag('NOTIFY_ON_SUCCESS', default=False):
-			return True
-		if skipped_count > 0 and self._env_flag('NOTIFY_ON_SKIPPED', default=False):
-			return True
-		return False
+		return success_count > 0 or fail_count > 0
+
+	def notify_once_enabled(self) -> bool:
+		"""是否启用每日成功通知去重。"""
+		return self._env_flag('NOTIFY_ONCE', default=False)
 
 	@staticmethod
 	def _html_to_text(content: str) -> str:
@@ -187,7 +189,7 @@ class NotificationKit:
 		content: str,
 		msg_type: Literal['text', 'html'] = 'text',
 		text_content: str | None = None,
-	) -> None:
+	) -> int:
 		"""推送消息到所有已配置的通知渠道"""
 		self.reload_from_env()
 		html_content = content if msg_type == 'html' else content.replace('\n', '<br>')
@@ -232,6 +234,7 @@ class NotificationKit:
 				print(f'[{name}]: 失败 - {str(e)[:50]}')
 
 		print(f'[通知] 共 {success_count} 个通知发送成功')
+		return success_count
 
 
 notify = NotificationKit()

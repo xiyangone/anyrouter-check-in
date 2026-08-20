@@ -4,6 +4,7 @@ AnyRouter.top 自动签到脚本
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -12,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import httpx
 from dotenv import load_dotenv
@@ -30,10 +31,14 @@ DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0
 AGENTROUTER_LOGIN_TIMEOUT_MS = 60_000
+AGENTROUTER_LOGIN_FORM_TIMEOUT_MS = 20_000
 AGENTROUTER_TURNSTILE_TIMEOUT_MS = 30_000
 AGENTROUTER_LOG_RETRIES = 5
 AGENTROUTER_LOG_RETRY_DELAY = 1.0
 AGENTROUTER_SYSTEM_LOG_TYPE = 4
+NOTIFICATION_STATE_FILE = Path('.venv/.checkin_notify_state.json')
+WAITING_FOR_CHECKIN = '未到新的签到时机'
+WAITING_ERROR_MARKERS = ('未到签到', '未到时间', '尚未到', '签到尚未开放', '签到未开放', 'not yet time', 'too early')
 # WAF cookies 缓存配置
 WAF_CACHE_FILE = Path('.waf_cache.json')
 WAF_CACHE_TTL = timedelta(hours=2)  # 缓存有效期 2 小时
@@ -71,6 +76,13 @@ class CheckinResult(TypedDict):
 	balance_after: BalanceInfo | None
 	provider: NotRequired[str]
 	account_name: NotRequired[str]
+	account_key: NotRequired[str]
+	status: NotRequired[Literal['success', 'skipped', 'waiting', 'failed']]
+
+
+class NotificationState(TypedDict):
+	date: str
+	notified_successes: list[str]
 
 
 def make_result(
@@ -83,9 +95,11 @@ def make_result(
 	error: str | None = None,
 	balance_before: BalanceInfo | None = None,
 	balance_after: BalanceInfo | None = None,
+	account_key: str | None = None,
+	status: Literal['success', 'skipped', 'waiting', 'failed'] | None = None,
 ) -> CheckinResult:
 	"""构建统一的跨平台签到结果。"""
-	return CheckinResult(
+	result = CheckinResult(
 		success=success,
 		account_index=account_index,
 		provider=provider,
@@ -95,12 +109,137 @@ def make_result(
 		balance_before=balance_before,
 		balance_after=balance_after,
 	)
+	result['account_key'] = account_key or build_account_key(provider, f'{account_index}:{account_name}')
+	if status:
+		result['status'] = status
+	return result
 
 
 # ============ 工具函数 ============
 def get_beijing_time() -> str:
 	"""获取北京时间字符串"""
 	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def get_beijing_date() -> str:
+	"""获取用于每日通知去重的北京时间日期。"""
+	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d')
+
+
+def build_account_key(provider: str, identity: str) -> str:
+	"""生成不暴露账号原文的稳定通知状态键。"""
+	digest = hashlib.sha256(f'{provider}:{identity}'.encode()).hexdigest()
+	return f'{provider.lower()}-{digest[:20]}'
+
+
+def get_result_status(result: CheckinResult | BaseException) -> Literal['success', 'skipped', 'waiting', 'failed']:
+	"""统一解析结果状态，兼容尚未显式写入 status 的旧结果。"""
+	if isinstance(result, BaseException):
+		return 'failed'
+	status = result.get('status')
+	if status:
+		return status
+	if result['success']:
+		return 'success'
+	if result['error'] == '今日已签到':
+		return 'skipped'
+	error = result.get('error')
+	if isinstance(error, str) and any(marker in error.lower() for marker in WAITING_ERROR_MARKERS):
+		return 'waiting'
+	return 'failed'
+
+
+def get_result_account_key(result: CheckinResult) -> str:
+	"""获取结果对应的通知状态键。"""
+	account_key = result.get('account_key')
+	if account_key:
+		return account_key
+	provider = result.get('provider', 'Router')
+	account_name = result.get('account_name', f'账号 {result["account_index"] + 1}')
+	return build_account_key(provider, account_name)
+
+
+def load_notification_state() -> NotificationState:
+	"""读取当天已推送成功账号；缓存缺失或过期时从空状态开始。"""
+	today = get_beijing_date()
+	empty_state = NotificationState(date=today, notified_successes=[])
+	if not NOTIFICATION_STATE_FILE.exists():
+		return empty_state
+
+	try:
+		payload = json.loads(NOTIFICATION_STATE_FILE.read_text(encoding='utf-8'))
+	except (OSError, json.JSONDecodeError):
+		return empty_state
+	if not isinstance(payload, dict) or payload.get('date') != today:
+		return empty_state
+
+	notified = payload.get('notified_successes', [])
+	if not isinstance(notified, list):
+		return empty_state
+	return NotificationState(date=today, notified_successes=[item for item in notified if isinstance(item, str)])
+
+
+def save_notification_state(state: NotificationState) -> None:
+	"""保存当天通知状态，供后续 Actions 运行恢复。"""
+	try:
+		NOTIFICATION_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+	except OSError as e:
+		print(f'[通知] 保存推送状态失败，本轮仍继续: {str(e)[:80]}')
+
+
+def build_notification_results(
+	results: list[CheckinResult | BaseException], state: NotificationState, notify_once: bool
+) -> tuple[list[CheckinResult | BaseException], list[str]]:
+	"""按单次通知模式过滤已成功账号，并标记尚未产生新奖励的账号。"""
+	if not notify_once:
+		return results, []
+
+	notified = set(state['notified_successes'])
+	notification_results: list[CheckinResult | BaseException] = []
+	new_successes: list[str] = []
+	for result in results:
+		if isinstance(result, BaseException):
+			notification_results.append(result)
+			continue
+
+		status = get_result_status(result)
+		account_key = get_result_account_key(result)
+		if status == 'success':
+			if account_key not in notified:
+				notification_results.append(result)
+				new_successes.append(account_key)
+		elif status == 'failed':
+			notification_results.append(result)
+		elif status == 'waiting' and account_key not in notified:
+			waiting_result = CheckinResult(**result)
+			waiting_result['status'] = 'waiting'
+			waiting_result['error'] = None
+			waiting_result['user_info'] = WAITING_FOR_CHECKIN
+			notification_results.append(waiting_result)
+		elif status == 'skipped' and account_key not in notified:
+			waiting_result = CheckinResult(**result)
+			waiting_result['status'] = 'waiting'
+			waiting_result['error'] = None
+			waiting_result['user_info'] = WAITING_FOR_CHECKIN
+			notification_results.append(waiting_result)
+
+	return notification_results, new_successes
+
+
+def build_notification_title(results: list[CheckinResult | BaseException]) -> str:
+	"""让邮件标题直接指出本轮成功的平台。"""
+	success_providers = {
+		result.get('provider', 'Router')
+		for result in results
+		if not isinstance(result, BaseException) and get_result_status(result) == 'success'
+	}
+	if len(success_providers) == 1:
+		return f'{next(iter(success_providers))} 签到成功'
+	if len(success_providers) > 1:
+		return 'Router 多平台签到成功'
+	if any(get_result_status(result) == 'failed' for result in results):
+		return 'Router 自动签到异常'
+	return 'Router 自动签到状态'
 
 
 def load_waf_cache() -> dict[str, str] | None:
@@ -146,22 +285,67 @@ def save_waf_cache(cookies: dict[str, str]) -> None:
 
 
 def build_html_notification(
-	results: list[CheckinResult | BaseException], success_count: int, skipped_count: int, total_count: int
+	results: list[CheckinResult | BaseException],
+	success_count: int,
+	skipped_count: int,
+	waiting_count: int,
+	total_count: int,
 ) -> str:
-	"""构建兼容主流邮件客户端的双平台 HTML 通知。"""
-	fail_count = total_count - success_count - skipped_count
+	"""构建带实色降级背景的玻璃态双平台 HTML 邮件。"""
+	fail_count = total_count - success_count - skipped_count - waiting_count
+	providers = list(
+		dict.fromkeys(result.get('provider', 'Router') for result in results if not isinstance(result, BaseException))
+	)
+	notification_scope = ' + '.join(providers) or 'Router'
 	status_meta = {
-		'success': {'label': '签到成功', 'color': '#047857', 'soft': '#ecfdf5', 'line': '#a7f3d0'},
-		'skipped': {'label': '今日已签', 'color': '#475569', 'soft': '#f8fafc', 'line': '#cbd5e1'},
-		'failed': {'label': '签到失败', 'color': '#b91c1c', 'soft': '#fef2f2', 'line': '#fecaca'},
+		'success': {
+			'label': '签到成功',
+			'color': '#047857',
+			'soft': '#ecfdf5',
+			'line': '#a7f3d0',
+			'glow': 'rgba(16,185,129,.12)',
+		},
+		'skipped': {
+			'label': '今日已签',
+			'color': '#475569',
+			'soft': '#f8fafc',
+			'line': '#cbd5e1',
+			'glow': 'rgba(100,116,139,.10)',
+		},
+		'waiting': {
+			'label': '未到时间',
+			'color': '#1d4ed8',
+			'soft': '#eff6ff',
+			'line': '#bfdbfe',
+			'glow': 'rgba(59,130,246,.12)',
+		},
+		'failed': {
+			'label': '签到失败',
+			'color': '#b91c1c',
+			'soft': '#fef2f2',
+			'line': '#fecaca',
+			'glow': 'rgba(239,68,68,.11)',
+		},
 	}
 
-	if success_count == total_count:
+	if fail_count > 0 and success_count > 0:
+		overall_status = '部分账号签到成功，部分账号需要处理'
+		overall_color = '#b45309'
+		overall_soft = '#fffbeb'
+	elif fail_count > 0:
+		overall_status = '账号签到失败'
+		overall_color = '#b91c1c'
+		overall_soft = '#fef2f2'
+	elif success_count == total_count:
 		overall_status = '全部账号签到成功'
 		overall_color = '#047857'
 		overall_soft = '#ecfdf5'
-	elif success_count + skipped_count == total_count:
-		overall_status = '全部账号处理完成'
+	elif success_count > 0 and waiting_count > 0:
+		overall_status = '本轮已有账号签到成功，其余账号等待新的签到时机'
+		overall_color = '#1d4ed8'
+		overall_soft = '#eff6ff'
+	elif success_count + skipped_count + waiting_count == total_count:
+		overall_status = '本轮无需重复签到'
 		overall_color = '#1d4ed8'
 		overall_soft = '#eff6ff'
 	elif success_count > 0:
@@ -169,24 +353,25 @@ def build_html_notification(
 		overall_color = '#b45309'
 		overall_soft = '#fffbeb'
 	else:
-		overall_status = '账号签到失败'
-		overall_color = '#b91c1c'
-		overall_soft = '#fef2f2'
+		overall_status = '本轮暂无新的签到结果'
+		overall_color = '#475569'
+		overall_soft = '#f8fafc'
 
 	stats = (
-		('签到成功', success_count, '#047857', '#ecfdf5'),
-		('今日已签', skipped_count, '#475569', '#f8fafc'),
-		('签到失败', fail_count, '#b91c1c', '#fef2f2'),
+		('签到成功', success_count, '#047857', '#ecfdf5', 'rgba(16,185,129,.13)'),
+		('今日已签', skipped_count, '#475569', '#f8fafc', 'rgba(100,116,139,.10)'),
+		('等待签到', waiting_count, '#1d4ed8', '#eff6ff', 'rgba(59,130,246,.12)'),
+		('签到失败', fail_count, '#b91c1c', '#fef2f2', 'rgba(239,68,68,.11)'),
 	)
 	stats_html = ''.join(
-		f"""<td width="33.33%" style="padding: 0 5px; vertical-align: top;">
-			<div style="border: 1px solid #e2e8f0; border-radius: 8px; background: {soft}; padding: 14px 12px;">
-				<div style="font-size: 12px; line-height: 1.4; color: #64748b;">{label}</div>
-				<div style="margin-top: 7px; font-size: 26px; line-height: 1; font-weight: 700; color: {color};">{value}</div>
-				<div style="margin-top: 7px; font-size: 11px; line-height: 1.4; color: #64748b;">共 {total_count} 个账号</div>
+		f"""<td class="stat-cell" width="25%" style="padding: 0 5px 10px; vertical-align: top;">
+			<div style="border: 1px solid rgba(255,255,255,.78); border-radius: 14px; background: {soft}; background: rgba(255,255,255,.62); box-shadow: 0 10px 22px {glow}, inset 0 1px 0 rgba(255,255,255,.92); padding: 15px 14px; backdrop-filter: blur(12px) saturate(1.35); -webkit-backdrop-filter: blur(12px) saturate(1.35);">
+				<div style="font-size: 12px; line-height: 1.4; color: #475569;">{label}</div>
+				<div style="margin-top: 8px; font-size: 28px; line-height: 1; font-weight: 800; letter-spacing: 0; color: {color};">{value}</div>
+				<div style="margin-top: 8px; font-size: 11px; line-height: 1.4; color: #64748b;">共 {total_count} 个账号</div>
 			</div>
 		</td>"""
-		for label, value, color, soft in stats
+		for label, value, color, soft, glow in stats
 	)
 
 	account_rows: list[str] = []
@@ -197,9 +382,7 @@ def build_html_notification(
 			account_name = f'账号 {index}'
 			detail_html = f'<span style="color: #b91c1c;">处理异常: {escape(str(result)[:100])}</span>'
 		else:
-			status_key = (
-				'success' if result['success'] else ('skipped' if result['error'] == '今日已签到' else 'failed')
-			)
+			status_key = get_result_status(result)
 			provider = escape(result.get('provider', 'AnyRouter'))
 			account_name = escape(result.get('account_name', f'账号 {result["account_index"] + 1}'))
 			detail_parts: list[str] = []
@@ -211,45 +394,57 @@ def build_html_notification(
 
 		meta = status_meta[status_key]
 		account_rows.append(
-			f"""<div style="margin-top: 10px; border: 1px solid {meta['line']}; border-radius: 8px; background: {meta['soft']}; padding: 13px 14px;">
+			f"""<div style="margin-top: 10px; border: 1px solid {meta['line']}; border-radius: 14px; background: {meta['soft']}; background: rgba(255,255,255,.58); box-shadow: 0 10px 24px {meta['glow']}, inset 0 1px 0 rgba(255,255,255,.90); padding: 14px 15px; backdrop-filter: blur(12px) saturate(1.3); -webkit-backdrop-filter: blur(12px) saturate(1.3);">
 				<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 					<tr>
 						<td style="vertical-align: middle;">
-							<span style="display: inline-block; border: 1px solid #ddd6fe; border-radius: 6px; background: #f5f3ff; padding: 3px 7px; font-size: 11px; font-weight: 700; color: #6d28d9;">{provider}</span>
+							<span style="display: inline-block; border: 1px solid #c4b5fd; border-radius: 8px; background: #f5f3ff; background: rgba(245,243,255,.82); padding: 4px 8px; font-size: 11px; font-weight: 800; color: #6d28d9;">{provider}</span>
 							<span style="margin-left: 7px; font-size: 14px; font-weight: 700; color: #172033;">{account_name}</span>
 						</td>
 						<td align="right" style="vertical-align: middle; white-space: nowrap;">
-							<span style="display: inline-block; border-radius: 6px; background: {meta['color']}; padding: 4px 8px; font-size: 11px; font-weight: 700; color: #ffffff;">{meta['label']}</span>
+							<span style="display: inline-block; border-radius: 8px; background: {meta['color']}; padding: 5px 9px; font-size: 11px; font-weight: 800; color: #ffffff;">{meta['label']}</span>
 						</td>
 					</tr>
 				</table>
-				<div style="margin-top: 9px; font-size: 13px; line-height: 1.65; color: #475569;">{detail_html}</div>
+				<div style="margin-top: 10px; font-size: 13px; line-height: 1.65; color: #475569;">{detail_html}</div>
 			</div>"""
 		)
 
 	return f"""<!doctype html>
 	<html lang="zh-CN">
-	<body style="margin: 0; padding: 0; background: #eef2f8;">
-		<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #eef2f8; font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif; color: #172033;">
-			<tr><td align="center" style="padding: 24px 10px;">
-				<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 720px; border: 1px solid #dbe3ef; border-radius: 8px; background: #ffffff; overflow: hidden;">
-					<tr><td style="padding: 28px 26px 24px; background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 54%, #2563eb 100%); color: #ffffff;">
-						<div style="font-size: 11px; line-height: 1.4; font-weight: 700; color: #e9e7ff;">ROUTER CHECK-IN</div>
-						<div style="margin-top: 9px; font-size: 27px; line-height: 1.25; font-weight: 700;">自动签到结果</div>
-						<div style="margin-top: 8px; font-size: 13px; line-height: 1.5; color: #eef2ff;">AnyRouter + AgentRouter · {get_beijing_time()}（北京时间）</div>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<style>
+			@media only screen and (max-width: 560px) {{
+				.email-shell {{ width: 100% !important; }}
+				.email-pad {{ padding-left: 16px !important; padding-right: 16px !important; }}
+				.hero-title {{ font-size: 25px !important; }}
+				.stat-cell {{ width: 100% !important; display: block !important; padding-left: 0 !important; padding-right: 0 !important; }}
+			}}
+		</style>
+	</head>
+	<body style="margin: 0; padding: 0; background: #eef2f8; background-image: radial-gradient(circle at 12% 5%, rgba(124,58,237,.16), transparent 34%), radial-gradient(circle at 88% 4%, rgba(14,165,233,.18), transparent 36%), radial-gradient(circle at 74% 84%, rgba(236,72,153,.11), transparent 40%), linear-gradient(180deg, #f7f9fd 0%, #e9eef7 100%); color: #172033;">
+		<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #eef2f8; background-color: #eef2f8; background-image: radial-gradient(circle at 12% 5%, rgba(124,58,237,.16), transparent 34%), radial-gradient(circle at 88% 4%, rgba(14,165,233,.18), transparent 36%), radial-gradient(circle at 74% 84%, rgba(236,72,153,.11), transparent 40%), linear-gradient(180deg, #f7f9fd 0%, #e9eef7 100%); font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif; color: #172033;">
+			<tr><td align="center" style="padding: 30px 12px;">
+				<table class="email-shell" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 720px; border: 1px solid rgba(255,255,255,.78); border-radius: 20px; background: #f8fafc; background: rgba(255,255,255,.68); box-shadow: 0 24px 60px rgba(15,23,42,.12), inset 0 1px 0 rgba(255,255,255,.95); overflow: hidden; backdrop-filter: blur(20px) saturate(1.45); -webkit-backdrop-filter: blur(20px) saturate(1.45);">
+					<tr><td style="padding: 31px 28px 27px; background: #4f46e5; background: linear-gradient(135deg, #7c3aed 0%, #5850e6 48%, #2563eb 100%); color: #ffffff; box-shadow: inset 0 1px 0 rgba(255,255,255,.28);">
+						<div style="font-size: 11px; line-height: 1.4; font-weight: 800; letter-spacing: 0; color: #ede9fe;">ROUTER CHECK-IN</div>
+						<div class="hero-title" style="margin-top: 10px; font-size: 30px; line-height: 1.2; font-weight: 800; letter-spacing: 0;">自动签到结果</div>
+						<div style="margin-top: 10px; font-size: 13px; line-height: 1.55; color: #eef2ff;">{notification_scope} · {get_beijing_time()}（北京时间）</div>
 					</td></tr>
-					<tr><td style="padding: 20px 21px 8px;">
-						<div style="border-left: 4px solid {overall_color}; border-radius: 6px; background: {overall_soft}; padding: 11px 13px; font-size: 14px; font-weight: 700; color: {overall_color};">{overall_status}</div>
+					<tr><td class="email-pad" style="padding: 22px 22px 9px;">
+						<div style="border: 1px solid rgba(255,255,255,.78); border-left: 4px solid {overall_color}; border-radius: 12px; background: {overall_soft}; background: rgba(255,255,255,.62); box-shadow: 0 10px 22px rgba(15,23,42,.06), inset 0 1px 0 rgba(255,255,255,.9); padding: 13px 15px; font-size: 14px; font-weight: 800; color: {overall_color}; backdrop-filter: blur(10px) saturate(1.25); -webkit-backdrop-filter: blur(10px) saturate(1.25);">{overall_status}</div>
 					</td></tr>
-					<tr><td style="padding: 12px 16px 8px;">
-						<div style="margin: 0 5px 10px; font-size: 12px; font-weight: 700; color: #64748b;">统计概览</div>
+					<tr><td class="email-pad" style="padding: 14px 17px 8px;">
+						<div style="margin: 0 5px 11px; font-size: 12px; font-weight: 800; letter-spacing: 0; color: #475569;">统计概览</div>
 						<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>{stats_html}</tr></table>
 					</td></tr>
-					<tr><td style="padding: 14px 21px 24px;">
-						<div style="margin-bottom: 4px; font-size: 12px; font-weight: 700; color: #64748b;">账号明细</div>
+					<tr><td class="email-pad" style="padding: 14px 22px 27px;">
+						<div style="margin-bottom: 5px; font-size: 12px; font-weight: 800; letter-spacing: 0; color: #475569;">账号明细</div>
 						{''.join(account_rows)}
 					</td></tr>
-					<tr><td align="center" style="border-top: 1px solid #e2e8f0; background: #f8fafc; padding: 15px 18px; font-size: 11px; line-height: 1.5; color: #64748b;">Powered by Router Auto Check-in</td></tr>
+					<tr><td align="center" style="border-top: 1px solid rgba(226,232,240,.78); background: #f8fafc; background: rgba(248,250,252,.70); padding: 16px 18px; font-size: 11px; line-height: 1.5; color: #64748b;">Powered by Router Auto Check-in</td></tr>
 				</table>
 			</td></tr>
 		</table>
@@ -268,19 +463,29 @@ def calculate_actual_reward(balance_before: BalanceInfo | None, balance_after: B
 
 
 def build_plain_text_notification(
-	results: list[CheckinResult | BaseException], success_count: int, skipped_count: int, total_count: int
+	results: list[CheckinResult | BaseException],
+	success_count: int,
+	skipped_count: int,
+	waiting_count: int,
+	total_count: int,
 ) -> str:
 	"""构建适合息知等纯文本通道的结构化通知内容。"""
-	fail_count = total_count - success_count - skipped_count
+	fail_count = total_count - success_count - skipped_count - waiting_count
 
-	if success_count == total_count:
+	if fail_count > 0 and success_count > 0:
+		overall_status = '部分账号签到成功，部分账号需要处理'
+	elif fail_count > 0:
+		overall_status = '账号签到失败'
+	elif success_count == total_count:
 		overall_status = '全部账号签到成功'
-	elif success_count + skipped_count == total_count:
-		overall_status = '全部账号处理完成'
+	elif success_count > 0 and waiting_count > 0:
+		overall_status = '本轮已有账号签到成功，其余账号等待新的签到时机'
+	elif success_count + skipped_count + waiting_count == total_count:
+		overall_status = '本轮无需重复签到'
 	elif success_count > 0:
 		overall_status = '部分账号处理成功'
 	else:
-		overall_status = '账号签到失败'
+		overall_status = '本轮暂无新的签到结果'
 
 	lines = [
 		overall_status,
@@ -289,6 +494,7 @@ def build_plain_text_notification(
 		'统计：',
 		f'- 成功：{success_count}/{total_count}',
 		f'- 已签：{skipped_count}/{total_count}',
+		f'- 等待：{waiting_count}/{total_count}',
 		f'- 失败：{fail_count}/{total_count}',
 	]
 
@@ -302,10 +508,13 @@ def build_plain_text_notification(
 		provider = result.get('provider', 'AnyRouter')
 		account_name = result.get('account_name', f'账号 {result["account_index"] + 1}')
 		reward = calculate_actual_reward(result['balance_before'], result['balance_after'])
-		if result['success']:
+		status = get_result_status(result)
+		if status == 'success':
 			headline = f'{index}) [{provider}] {account_name}｜[成功]'
-		elif result['error'] == '今日已签到':
+		elif status == 'skipped':
 			headline = f'{index}) [{provider}] {account_name}｜[已签]'
+		elif status == 'waiting':
+			headline = f'{index}) [{provider}] {account_name}｜[未到时间]'
 		else:
 			headline = f'{index}) [{provider}] {account_name}｜[失败]'
 
@@ -645,6 +854,7 @@ async def check_in_account(
 	# 解析账号配置
 	cookies_data = account_info.get('cookies', {})
 	api_user = account_info.get('api_user', '')
+	account_key = build_account_key('AnyRouter', api_user or f'index:{account_index}')
 
 	if not api_user:
 		print(f'[失败] {account_name}: 未找到 API user 标识')
@@ -653,6 +863,7 @@ async def check_in_account(
 			account_index=account_index,
 			provider='AnyRouter',
 			account_name=account_name,
+			account_key=account_key,
 			error='缺少 api_user',
 		)
 
@@ -668,6 +879,7 @@ async def check_in_account(
 			account_index=account_index,
 			provider='AnyRouter',
 			account_name=account_name,
+			account_key=account_key,
 			error='cookies 格式无效',
 		)
 
@@ -679,6 +891,7 @@ async def check_in_account(
 			account_index=account_index,
 			provider='AnyRouter',
 			account_name=account_name,
+			account_key=account_key,
 			error='WAF cookies 获取失败',
 		)
 
@@ -741,6 +954,7 @@ async def check_in_account(
 		account_index=account_index,
 		provider='AnyRouter',
 		account_name=account_name,
+		account_key=account_key,
 		user_info=user_info,
 		error=error_msg,
 		balance_before=balance_before,
@@ -787,37 +1001,79 @@ async def first_visible_locator(*locators: Locator) -> Locator | None:
 	return None
 
 
+async def wait_for_first_visible_locator(*locators: Locator, timeout_ms: int) -> Locator | None:
+	"""等待 SPA 渲染，并返回第一项可见定位器。"""
+	loop = asyncio.get_running_loop()
+	deadline = loop.time() + timeout_ms / 1000
+	while loop.time() < deadline:
+		candidate = await first_visible_locator(*locators)
+		if candidate is not None:
+			return candidate
+		await page_wait_interval()
+	return None
+
+
+async def page_wait_interval() -> None:
+	"""登录页短轮询间隔，单独封装便于测试。"""
+	await asyncio.sleep(0.1)
+
+
 async def prepare_agentrouter_login_form(page: Page) -> tuple[Locator, Locator, Locator]:
 	"""展开 AgentRouter 邮箱登录方式并返回表单定位器。"""
-	username = await first_visible_locator(
+	username_locators = (
 		page.locator('#username'),
 		page.locator('input[name="username"]'),
 		page.locator('input[name="email"]'),
+		page.get_by_role('textbox', name=re.compile(r'用户名或邮箱|邮箱|Email|Username', re.I)),
 	)
+	email_login_locators = (
+		page.get_by_role('button', name=re.compile(r'使用\s*(邮箱或用户名|Email or Username)\s*登录', re.I)),
+		page.get_by_role('button', name=re.compile(r'邮箱或用户名|Email or Username', re.I)),
+		page.get_by_role('button', name=re.compile(r'邮箱|Email', re.I)),
+	)
+
+	username: Locator | None = None
+	email_login_button: Locator | None = None
+	loop = asyncio.get_running_loop()
+	deadline = loop.time() + AGENTROUTER_LOGIN_FORM_TIMEOUT_MS / 1000
+	while loop.time() < deadline and username is None and email_login_button is None:
+		username = await first_visible_locator(*username_locators)
+		if username is None:
+			email_login_button = await first_visible_locator(*email_login_locators)
+		if username is None and email_login_button is None:
+			await page_wait_interval()
+
 	if username is None:
-		email_login_button = await first_visible_locator(
-			page.get_by_role('button', name=re.compile(r'邮箱或用户名|Email or Username', re.I)),
-			page.get_by_role('button', name=re.compile(r'邮箱|Email', re.I)),
-		)
 		if email_login_button is None:
-			raise RuntimeError('未找到邮箱登录入口')
+			raise RuntimeError(f'等待 {AGENTROUTER_LOGIN_FORM_TIMEOUT_MS // 1000} 秒后仍未找到邮箱登录入口或登录表单')
 		await email_login_button.click()
-		await page.locator('#username, input[name="username"], input[name="email"]').first.wait_for(
-			state='visible', timeout=10_000
-		)
-		username = await first_visible_locator(
-			page.locator('#username'),
-			page.locator('input[name="username"]'),
-			page.locator('input[name="email"]'),
+		username = await wait_for_first_visible_locator(
+			*username_locators,
+			timeout_ms=AGENTROUTER_LOGIN_FORM_TIMEOUT_MS,
 		)
 
-	password = await first_visible_locator(page.locator('#password'), page.locator('input[name="password"]'))
-	submit = await first_visible_locator(
-		page.locator('form.semi-form button[type="submit"]'),
-		page.get_by_role('button', name=re.compile(r'^继续$|^登录$|Continue|Sign in', re.I)),
+	password = await wait_for_first_visible_locator(
+		page.locator('#password'),
+		page.locator('input[name="password"]'),
+		page.get_by_role('textbox', name=re.compile(r'密码|Password', re.I)),
+		timeout_ms=AGENTROUTER_LOGIN_FORM_TIMEOUT_MS,
 	)
-	if username is None or password is None or submit is None:
-		raise RuntimeError('AgentRouter 登录表单结构不完整')
+	submit = await wait_for_first_visible_locator(
+		page.locator('form.semi-form button[type="submit"]'),
+		page.locator('form button[type="submit"]'),
+		page.get_by_role('button', name=re.compile(r'^继续$|^登录$|Continue|Sign in', re.I)),
+		timeout_ms=AGENTROUTER_LOGIN_FORM_TIMEOUT_MS,
+	)
+	missing_fields = [
+		label
+		for label, locator in (('用户名或邮箱', username), ('密码', password), ('继续按钮', submit))
+		if locator is None
+	]
+	if missing_fields:
+		raise RuntimeError(f'AgentRouter 登录表单结构不完整，缺少: {", ".join(missing_fields)}')
+	assert username is not None
+	assert password is not None
+	assert submit is not None
 	return username, password, submit
 
 
@@ -921,6 +1177,7 @@ async def check_in_agentrouter_account(
 	account_name = get_agentrouter_account_name(account_info, account_index)
 	email = account_info.get('email', '')
 	password = account_info.get('password', '')
+	account_key = build_account_key('AgentRouter', email.lower() or f'index:{account_index}')
 	print(f'\n[处理中] AgentRouter: {account_name}')
 	print(f'[信息] {account_name}: 邮箱 {mask_email(email) or "(格式异常)"}')
 
@@ -953,6 +1210,7 @@ async def check_in_agentrouter_account(
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
+				account_key=account_key,
 				error='登录请求超时，未捕获 /api/user/login 响应',
 			)
 
@@ -962,6 +1220,7 @@ async def check_in_agentrouter_account(
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
+				account_key=account_key,
 				error=f'登录失败 (HTTP {login_response.status})',
 			)
 
@@ -972,6 +1231,7 @@ async def check_in_agentrouter_account(
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
+				account_key=account_key,
 				error=login_payload.get('message') or '邮箱或密码错误',
 			)
 
@@ -983,6 +1243,7 @@ async def check_in_agentrouter_account(
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
+				account_key=account_key,
 				error='登录响应缺少用户 ID，无法核验系统签到日志',
 			)
 
@@ -1006,6 +1267,7 @@ async def check_in_agentrouter_account(
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
+				account_key=account_key,
 				user_info=user_info,
 				balance_after=balance_after,
 			)
@@ -1016,6 +1278,7 @@ async def check_in_agentrouter_account(
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
+				account_key=account_key,
 				user_info=user_info,
 				error='今日已签到',
 				balance_after=balance_after,
@@ -1027,6 +1290,7 @@ async def check_in_agentrouter_account(
 			account_index=account_index,
 			provider='AgentRouter',
 			account_name=account_name,
+			account_key=account_key,
 			user_info=balance_info,
 			error=log_content,
 			balance_after=balance_after,
@@ -1037,6 +1301,7 @@ async def check_in_agentrouter_account(
 			account_index=account_index,
 			provider='AgentRouter',
 			account_name=account_name,
+			account_key=account_key,
 			error=f'页面或 Turnstile 等待超时: {str(e)[:80]}',
 		)
 	except Exception as e:
@@ -1045,6 +1310,7 @@ async def check_in_agentrouter_account(
 			account_index=account_index,
 			provider='AgentRouter',
 			account_name=account_name,
+			account_key=account_key,
 			error=f'处理异常: {str(e)[:100]}',
 		)
 	finally:
@@ -1056,11 +1322,13 @@ async def check_in_agentrouter_account(
 
 
 def make_anyrouter_failure(account: AccountConfig, account_index: int, error: str) -> CheckinResult:
+	api_user = account.get('api_user', '')
 	return make_result(
 		success=False,
 		account_index=account_index,
 		provider='AnyRouter',
 		account_name=account.get('name') or f'账号 {account_index + 1}',
+		account_key=build_account_key('AnyRouter', api_user or f'index:{account_index}'),
 		error=error,
 	)
 
@@ -1110,11 +1378,13 @@ async def run_anyrouter_checkins(accounts: list[AccountConfig]) -> list[CheckinR
 
 
 def make_agentrouter_failure(account: AgentRouterAccountConfig, account_index: int, error: str) -> CheckinResult:
+	email = account.get('email', '')
 	return make_result(
 		success=False,
 		account_index=account_index,
 		provider='AgentRouter',
 		account_name=get_agentrouter_account_name(account, account_index),
+		account_key=build_account_key('AgentRouter', email.lower() or f'index:{account_index}'),
 		error=error,
 	)
 
@@ -1158,13 +1428,10 @@ async def run_agentrouter_checkins(accounts: list[AgentRouterAccountConfig]) -> 
 	return results
 
 
-def count_results(results: list[CheckinResult | BaseException]) -> tuple[int, int]:
-	"""统计成功与今日已签数量。"""
-	success_count = sum(1 for result in results if not isinstance(result, BaseException) and result['success'])
-	skipped_count = sum(
-		1 for result in results if not isinstance(result, BaseException) and result['error'] == '今日已签到'
-	)
-	return success_count, skipped_count
+def count_results(results: list[CheckinResult | BaseException]) -> tuple[int, int, int]:
+	"""统计成功、今日已签和等待签到数量。"""
+	statuses = [get_result_status(result) for result in results]
+	return statuses.count('success'), statuses.count('skipped'), statuses.count('waiting')
 
 
 async def main():
@@ -1186,19 +1453,39 @@ async def main():
 	results.extend(await run_anyrouter_checkins(anyrouter_accounts))
 	results.extend(await run_agentrouter_checkins(agentrouter_accounts))
 	total_count = len(results)
-	success_count, skipped_count = count_results(results)
-	fail_count = total_count - success_count - skipped_count
+	success_count, skipped_count, waiting_count = count_results(results)
+	fail_count = total_count - success_count - skipped_count - waiting_count
 
-	notify_content = build_plain_text_notification(results, success_count, skipped_count, total_count)
-	print(notify_content)
-	html_content = build_html_notification(results, success_count, skipped_count, total_count)
-	if notify.should_send_checkin(success_count, skipped_count, total_count):
-		notify.push_message('Router 自动签到结果', html_content, msg_type='html', text_content=notify_content)
+	log_content = build_plain_text_notification(results, success_count, skipped_count, waiting_count, total_count)
+	print(log_content)
+
+	state = load_notification_state()
+	notify_once = notify.notify_once_enabled()
+	notification_results, new_successes = build_notification_results(results, state, notify_once)
+	notify_total = len(notification_results)
+	notify_success, notify_skipped, notify_waiting = count_results(notification_results)
+	notify_passive = notify_skipped + notify_waiting
+	if notify.should_send_checkin(notify_success, notify_passive, notify_total):
+		notify_content = build_plain_text_notification(
+			notification_results, notify_success, notify_skipped, notify_waiting, notify_total
+		)
+		html_content = build_html_notification(
+			notification_results, notify_success, notify_skipped, notify_waiting, notify_total
+		)
+		sent_count = notify.push_message(
+			build_notification_title(notification_results),
+			html_content,
+			msg_type='html',
+			text_content=notify_content,
+		)
+		if sent_count > 0 and new_successes:
+			state['notified_successes'] = sorted(set(state['notified_successes']) | set(new_successes))
 	else:
-		print('[通知] 无失败账号，且 NOTIFY_ON_SUCCESS / NOTIFY_ON_SKIPPED 均未开启，跳过通知发送')
+		print('[通知] NOTIFY_ONCE=true，且本轮没有新的成功或失败，跳过重复通知')
+	save_notification_state(state)
 
 	print(f'[汇总] 成功 {success_count}，已签 {skipped_count}，失败 {fail_count}')
-	sys.exit(0 if success_count + skipped_count > 0 else 1)
+	sys.exit(0 if success_count + skipped_count + waiting_count > 0 else 1)
 
 
 def run_main():

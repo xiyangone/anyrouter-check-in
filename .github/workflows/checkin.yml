@@ -55,12 +55,25 @@ jobs:
         echo "缓存未命中，开始安装 Playwright 浏览器..."
         uv run --no-sync playwright install chromium --with-deps
 
+    - name: 生成通知状态缓存键
+      id: notify-state
+      run: |
+        $beijingDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")).ToString('yyyy-MM-dd')
+        echo "date=$beijingDate" >> $env:GITHUB_OUTPUT
+
+    - name: 恢复当天通知状态
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .venv/.checkin_notify_state.json
+        key: notify-state-${{ steps.notify-state.outputs.date }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          notify-state-${{ steps.notify-state.outputs.date }}-
+
     - name: 执行签到
       env:
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS || '' }}
         AGENTROUTER_ACCOUNTS: ${{ secrets.AGENTROUTER_ACCOUNTS || '' }}
-        NOTIFY_ON_SUCCESS: ${{ vars.NOTIFY_ON_SUCCESS || 'false' }}
-        NOTIFY_ON_SKIPPED: ${{ vars.NOTIFY_ON_SKIPPED || 'false' }}
+        NOTIFY_ONCE: ${{ vars.NOTIFY_ONCE || 'false' }}
         DINGDING_WEBHOOK: ${{ secrets['DINGDING_WEBHOOK'] || '' }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}
         EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
@@ -71,6 +84,13 @@ jobs:
         WEIXIN_WEBHOOK: ${{ secrets['WEIXIN_WEBHOOK'] || '' }}
       run: |
         uv run --no-sync checkin.py
+
+    - name: 保存当天通知状态
+      if: always()
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .venv/.checkin_notify_state.json
+        key: notify-state-${{ steps.notify-state.outputs.date }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     - name: 执行结果
       if: always()
