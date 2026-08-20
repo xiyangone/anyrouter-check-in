@@ -22,7 +22,7 @@ from notify import notify
 
 # ============ 配置常量 ============
 ANYROUTER_BASE_URL = 'https://anyrouter.top'
-AGENTROUTER_BASE_URL = 'https://ps.air-outer.com'
+AGENTROUTER_BASE_URL = 'https://agentrouter.org'
 BEIJING_TZ = timezone(timedelta(hours=8))  # 北京时区 UTC+8
 WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 DEFAULT_TIMEOUT = 30.0
@@ -987,6 +987,22 @@ def get_agentrouter_login_reference_time(login_started_at: int, server_login_tim
 	return max(login_started_at, parsed_server_time)
 
 
+def parse_agentrouter_json(response: httpx.Response, endpoint: str) -> dict[str, Any]:
+	"""解析 AgentRouter JSON，并在重定向或网关页面时给出可诊断错误。"""
+	try:
+		payload = response.json()
+	except json.JSONDecodeError as e:
+		content_type = response.headers.get('content-type', '未知')
+		location = response.headers.get('location')
+		detail = f'HTTP {response.status_code}, Content-Type {content_type}, {len(response.content)} bytes'
+		if location:
+			detail = f'{detail}, Location {location}'
+		raise RuntimeError(f'{endpoint} 返回非 JSON ({detail})') from e
+	if not isinstance(payload, dict):
+		raise RuntimeError(f'{endpoint} 返回的 JSON 不是对象')
+	return payload
+
+
 async def get_agentrouter_user_info(
 	client: Any, account_name: str, user_id: int
 ) -> tuple[BalanceInfo | None, str | None]:
@@ -999,7 +1015,7 @@ async def get_agentrouter_user_info(
 		)
 		if response.status_code != 200:
 			return None, None
-		payload = response.json()
+		payload = parse_agentrouter_json(response, '/api/user/self')
 		if not payload.get('success'):
 			return None, None
 		user_data = payload.get('data', {})
@@ -1041,7 +1057,7 @@ async def verify_agentrouter_checkin_log(
 		)
 		if response.status_code != 200:
 			raise RuntimeError(f'系统日志接口 HTTP {response.status_code}')
-		payload = response.json()
+		payload = parse_agentrouter_json(response, '/api/log/self')
 		if not payload.get('success'):
 			raise RuntimeError(payload.get('message') or '系统日志接口返回失败')
 
@@ -1076,7 +1092,7 @@ async def check_in_agentrouter_account(account_info: AgentRouterAccountConfig, a
 		async with httpx.AsyncClient(
 			base_url=AGENTROUTER_BASE_URL,
 			timeout=DEFAULT_TIMEOUT,
-			follow_redirects=True,
+			follow_redirects=False,
 			headers={'User-Agent': DEFAULT_USER_AGENT, 'Accept': 'application/json'},
 		) as client:
 			login_started_at = int(time.time())
@@ -1094,7 +1110,7 @@ async def check_in_agentrouter_account(account_info: AgentRouterAccountConfig, a
 					error=f'登录失败 (HTTP {login_response.status_code})',
 				)
 
-			login_payload = login_response.json()
+			login_payload = parse_agentrouter_json(login_response, '/api/user/login')
 			if not login_payload.get('success'):
 				return make_result(
 					success=False,
