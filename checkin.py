@@ -1003,26 +1003,35 @@ async def agentrouter_browser_fetch(
 	headers: dict[str, str] | None = None,
 ) -> BrowserFetchResponse:
 	"""在浏览器同源上下文中请求 AgentRouter API，继承 WAF 与会话 Cookie。"""
-	result = await page.evaluate(
-		"""async ({ endpoint, method, body, headers }) => {
-			const requestHeaders = { Accept: 'application/json', ...(headers || {}) };
-			if (body) requestHeaders['Content-Type'] = 'application/json';
-			const response = await fetch(endpoint, {
-				method,
-				headers: requestHeaders,
-				credentials: 'include',
-				body: body ? JSON.stringify(body) : undefined,
-			});
-			return {
-				status: response.status,
-				content_type: response.headers.get('content-type') || '',
-				text: await response.text(),
-				url: response.url,
-			};
-		}""",
-		{'endpoint': endpoint, 'method': method, 'body': body, 'headers': headers or {}},
-	)
-	return cast(BrowserFetchResponse, result)
+	for attempt in range(MAX_RETRIES):
+		result = cast(
+			BrowserFetchResponse,
+			await page.evaluate(
+				"""async ({ endpoint, method, body, headers }) => {
+					const requestHeaders = { Accept: 'application/json', ...(headers || {}) };
+					if (body) requestHeaders['Content-Type'] = 'application/json';
+					const response = await fetch(endpoint, {
+						method,
+						headers: requestHeaders,
+						credentials: 'include',
+						body: body ? JSON.stringify(body) : undefined,
+					});
+					return {
+						status: response.status,
+						content_type: response.headers.get('content-type') || '',
+						text: await response.text(),
+						url: response.url,
+					};
+				}""",
+				{'endpoint': endpoint, 'method': method, 'body': body, 'headers': headers or {}},
+			),
+		)
+		if 'html' not in result['content_type'].lower() or attempt == MAX_RETRIES - 1:
+			return result
+		delay = RETRY_BASE_DELAY * (2**attempt)
+		print(f'[重试] AgentRouter: {endpoint} 返回 HTML，{delay} 秒后沿用 WAF Cookie 重试')
+		await asyncio.sleep(delay)
+	raise RuntimeError('AgentRouter 浏览器请求未返回结果')
 
 
 def parse_agentrouter_json(response: BrowserFetchResponse, endpoint: str) -> dict[str, Any]:
@@ -1131,8 +1140,10 @@ async def check_in_agentrouter_account(
 	try:
 		context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
 		page = await context.new_page()
-		await page.goto(AGENTROUTER_BASE_URL, wait_until='domcontentloaded', timeout=DEFAULT_TIMEOUT * 1000)
-		await page.wait_for_timeout(2000)
+		await page.goto(
+			f'{AGENTROUTER_BASE_URL}/api/status', wait_until='domcontentloaded', timeout=DEFAULT_TIMEOUT * 1000
+		)
+		await page.wait_for_timeout(1000)
 
 		login_started_at = int(time.time())
 		login_response = await agentrouter_browser_fetch(
