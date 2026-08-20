@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   checkin:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     environment: production
     env:
       PYTHONIOENCODING: utf-8
@@ -36,30 +36,33 @@ jobs:
     - name: 获取 Playwright 版本
       id: playwright-version
       run: |
-        $version = uv run --no-sync python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))"
-        echo "version=$version" >> $env:GITHUB_OUTPUT
+        version=$(uv run --no-sync python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))")
+        echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "Playwright version: $version"
 
     - name: 缓存 Playwright 浏览器
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: playwright-cache
       with:
-        path: ~\AppData\Local\ms-playwright
+        path: ~/.cache/ms-playwright
         key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
         restore-keys: |
           ${{ runner.os }}-playwright-
+
+    - name: 安装 Playwright 系统依赖
+      run: |
+        uv run --no-sync playwright install-deps chromium
 
     - name: 安装 Playwright 浏览器
       if: steps.playwright-cache.outputs.cache-hit != 'true'
       run: |
         echo "缓存未命中，开始安装 Playwright 浏览器..."
-        uv run --no-sync playwright install chromium --with-deps
+        uv run --no-sync playwright install chromium
 
     - name: 生成通知状态缓存键
       id: notify-state
       run: |
-        $beijingDate = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")).ToString('yyyy-MM-dd')
-        echo "date=$beijingDate" >> $env:GITHUB_OUTPUT
+        echo "date=$(TZ=Asia/Shanghai date +%F)" >> "$GITHUB_OUTPUT"
 
     - name: 恢复当天通知状态
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -68,6 +71,12 @@ jobs:
         key: notify-state-${{ steps.notify-state.outputs.date }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           notify-state-${{ steps.notify-state.outputs.date }}-
+
+    - name: 启用 Cloudflare WARP 出口
+      uses: fscarmen/warp-on-actions@37ce1997e075435a827991dabcce1d080c1fe512
+      with:
+        stack: ipv4
+        mode: wireguard
 
     - name: 执行签到
       env:
@@ -96,8 +105,7 @@ jobs:
       if: always()
       run: |
         echo "签到任务执行完成"
-        $beijingTime = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time"))
-        echo "北京时间: $($beijingTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+        echo "北京时间: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
         echo ""
         echo "--- 定时执行说明 ---"
         echo "本任务每 6 小时执行一次 (UTC 0:00, 6:00, 12:00, 18:00)"
