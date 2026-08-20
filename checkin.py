@@ -80,6 +80,13 @@ class NotificationState(TypedDict):
 	notified_successes: list[str]
 
 
+class BrowserFetchResponse(TypedDict):
+	status: int
+	content_type: str
+	text: str
+	url: str
+
+
 def make_result(
 	*,
 	success: bool,
@@ -987,16 +994,46 @@ def get_agentrouter_login_reference_time(login_started_at: int, server_login_tim
 	return max(login_started_at, parsed_server_time)
 
 
-def parse_agentrouter_json(response: httpx.Response, endpoint: str) -> dict[str, Any]:
-	"""解析 AgentRouter JSON，并在重定向或网关页面时给出可诊断错误。"""
+async def agentrouter_browser_fetch(
+	page: Any,
+	endpoint: str,
+	*,
+	method: str = 'GET',
+	body: dict[str, str] | None = None,
+	headers: dict[str, str] | None = None,
+) -> BrowserFetchResponse:
+	"""在浏览器同源上下文中请求 AgentRouter API，继承 WAF 与会话 Cookie。"""
+	result = await page.evaluate(
+		"""async ({ endpoint, method, body, headers }) => {
+			const requestHeaders = { Accept: 'application/json', ...(headers || {}) };
+			if (body) requestHeaders['Content-Type'] = 'application/json';
+			const response = await fetch(endpoint, {
+				method,
+				headers: requestHeaders,
+				credentials: 'include',
+				body: body ? JSON.stringify(body) : undefined,
+			});
+			return {
+				status: response.status,
+				content_type: response.headers.get('content-type') || '',
+				text: await response.text(),
+				url: response.url,
+			};
+		}""",
+		{'endpoint': endpoint, 'method': method, 'body': body, 'headers': headers or {}},
+	)
+	return cast(BrowserFetchResponse, result)
+
+
+def parse_agentrouter_json(response: BrowserFetchResponse, endpoint: str) -> dict[str, Any]:
+	"""解析浏览器 API 响应，并在网关页面时给出可诊断错误。"""
 	try:
-		payload = response.json()
+		payload = json.loads(response['text'])
 	except json.JSONDecodeError as e:
-		content_type = response.headers.get('content-type', '未知')
-		location = response.headers.get('location')
-		detail = f'HTTP {response.status_code}, Content-Type {content_type}, {len(response.content)} bytes'
-		if location:
-			detail = f'{detail}, Location {location}'
+		detail = (
+			f'HTTP {response["status"]}, Content-Type {response["content_type"] or "未知"}, '
+			f'{len(response["text"].encode())} bytes, URL {response["url"]}'
+		)
 		raise RuntimeError(f'{endpoint} 返回非 JSON ({detail})') from e
 	if not isinstance(payload, dict):
 		raise RuntimeError(f'{endpoint} 返回的 JSON 不是对象')
@@ -1004,16 +1041,16 @@ def parse_agentrouter_json(response: httpx.Response, endpoint: str) -> dict[str,
 
 
 async def get_agentrouter_user_info(
-	client: Any, account_name: str, user_id: int
+	page: Any, account_name: str, user_id: int, auth_headers: dict[str, str]
 ) -> tuple[BalanceInfo | None, str | None]:
-	"""使用登录后的 HTTP 会话读取 AgentRouter 真实余额。"""
+	"""使用登录后的浏览器会话读取 AgentRouter 真实余额。"""
 	try:
-		response = await client.get(
+		response = await agentrouter_browser_fetch(
+			page,
 			'/api/user/self',
-			headers={'New-Api-User': str(user_id)},
-			timeout=DEFAULT_TIMEOUT,
+			headers={**auth_headers, 'New-Api-User': str(user_id)},
 		)
-		if response.status_code != 200:
+		if response['status'] != 200:
 			return None, None
 		payload = parse_agentrouter_json(response, '/api/user/self')
 		if not payload.get('success'):
@@ -1030,7 +1067,7 @@ async def get_agentrouter_user_info(
 
 
 async def verify_agentrouter_checkin_log(
-	client: Any, login_started_at: int, account_name: str, user_id: int
+	page: Any, login_started_at: int, account_name: str, user_id: int, auth_headers: dict[str, str]
 ) -> tuple[str, str]:
 	"""通过系统日志验证本次登录是否真的产生了签到额度。"""
 	now = datetime.now(BEIJING_TZ)
@@ -1050,13 +1087,13 @@ async def verify_agentrouter_checkin_log(
 	latest_today_log: str | None = None
 
 	for attempt in range(AGENTROUTER_LOG_RETRIES):
-		response = await client.get(
+		response = await agentrouter_browser_fetch(
+			page,
 			f'/api/log/self?{query}',
-			headers={'New-Api-User': str(user_id)},
-			timeout=DEFAULT_TIMEOUT,
+			headers={**auth_headers, 'New-Api-User': str(user_id)},
 		)
-		if response.status_code != 200:
-			raise RuntimeError(f'系统日志接口 HTTP {response.status_code}')
+		if response['status'] != 200:
+			raise RuntimeError(f'系统日志接口 HTTP {response["status"]}')
 		payload = parse_agentrouter_json(response, '/api/log/self')
 		if not payload.get('success'):
 			raise RuntimeError(payload.get('message') or '系统日志接口返回失败')
@@ -1079,8 +1116,10 @@ async def verify_agentrouter_checkin_log(
 	return 'failed', f'{account_name}: 登录成功，但未找到今日签到到账系统日志'
 
 
-async def check_in_agentrouter_account(account_info: AgentRouterAccountConfig, account_index: int) -> CheckinResult:
-	"""调用 AgentRouter 官方登录 API，并以系统日志确认实际签到。"""
+async def check_in_agentrouter_account(
+	browser: Browser, account_info: AgentRouterAccountConfig, account_index: int
+) -> CheckinResult:
+	"""在浏览器同源上下文调用 AgentRouter 官方 API，并以系统日志确认签到。"""
 	account_name = get_agentrouter_account_name(account_info, account_index)
 	email = account_info.get('email', '')
 	password = account_info.get('password', '')
@@ -1088,115 +1127,116 @@ async def check_in_agentrouter_account(account_info: AgentRouterAccountConfig, a
 	print(f'\n[处理中] AgentRouter: {account_name}')
 	print(f'[信息] {account_name}: 邮箱 {mask_email(email) or "(格式异常)"}')
 
+	context = None
 	try:
-		async with httpx.AsyncClient(
-			base_url=AGENTROUTER_BASE_URL,
-			timeout=DEFAULT_TIMEOUT,
-			follow_redirects=False,
-			headers={'User-Agent': DEFAULT_USER_AGENT, 'Accept': 'application/json'},
-		) as client:
-			login_started_at = int(time.time())
-			login_response = await client.post(
-				'/api/user/login?turnstile=',
-				json={'username': email, 'password': password},
-			)
-			if login_response.status_code != 200:
-				return make_result(
-					success=False,
-					account_index=account_index,
-					provider='AgentRouter',
-					account_name=account_name,
-					account_key=account_key,
-					error=f'登录失败 (HTTP {login_response.status_code})',
-				)
+		context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
+		page = await context.new_page()
+		await page.goto(AGENTROUTER_BASE_URL, wait_until='domcontentloaded', timeout=DEFAULT_TIMEOUT * 1000)
+		await page.wait_for_timeout(2000)
 
-			login_payload = parse_agentrouter_json(login_response, '/api/user/login')
-			if not login_payload.get('success'):
-				return make_result(
-					success=False,
-					account_index=account_index,
-					provider='AgentRouter',
-					account_name=account_name,
-					account_key=account_key,
-					error=login_payload.get('message') or '邮箱或密码错误',
-				)
-
-			login_data = login_payload.get('data', {})
-			if not isinstance(login_data, dict):
-				login_data = {}
-			if login_data.get('require_2fa'):
-				return make_result(
-					success=False,
-					account_index=account_index,
-					provider='AgentRouter',
-					account_name=account_name,
-					account_key=account_key,
-					error='账号启用了两步验证，自动签到暂不支持',
-				)
-
-			access_token = login_data.get('access_token')
-			if isinstance(access_token, str) and access_token:
-				client.headers['Authorization'] = f'Bearer {access_token}'
-			nested_user = login_data.get('user')
-			user_data = nested_user if isinstance(nested_user, dict) else login_data
-			user_id = int(user_data.get('id') or 0)
-			if not user_id:
-				return make_result(
-					success=False,
-					account_index=account_index,
-					provider='AgentRouter',
-					account_name=account_name,
-					account_key=account_key,
-					error='登录响应缺少用户 ID，无法核验系统签到日志',
-				)
-
-			await asyncio.sleep(0.5)
-			effective_login_time = get_agentrouter_login_reference_time(
-				login_started_at, user_data.get('last_login_time')
-			)
-			balance_after, balance_info = await get_agentrouter_user_info(client, account_name, user_id)
-			log_status, log_content = await verify_agentrouter_checkin_log(
-				client, effective_login_time, account_name, user_id
-			)
-			user_info = f'系统日志: {log_content}'
-			if balance_info:
-				user_info = f'{user_info}; {balance_info}'
-
-			if log_status == 'success':
-				print(f'[成功] {account_name}: {log_content}')
-				return make_result(
-					success=True,
-					account_index=account_index,
-					provider='AgentRouter',
-					account_name=account_name,
-					account_key=account_key,
-					user_info=user_info,
-					balance_after=balance_after,
-				)
-			if log_status == 'skipped':
-				print(f'[跳过] {account_name}: 今日系统日志已存在，本次登录未新增签到记录')
-				return make_result(
-					success=False,
-					account_index=account_index,
-					provider='AgentRouter',
-					account_name=account_name,
-					account_key=account_key,
-					user_info=user_info,
-					error='今日已签到',
-					balance_after=balance_after,
-				)
-
-			print(f'[失败] {log_content}')
+		login_started_at = int(time.time())
+		login_response = await agentrouter_browser_fetch(
+			page,
+			'/api/user/login?turnstile=',
+			method='POST',
+			body={'username': email, 'password': password},
+		)
+		if login_response['status'] != 200:
 			return make_result(
 				success=False,
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
 				account_key=account_key,
-				user_info=balance_info,
-				error=log_content,
+				error=f'登录失败 (HTTP {login_response["status"]})',
+			)
+
+		login_payload = parse_agentrouter_json(login_response, '/api/user/login')
+		if not login_payload.get('success'):
+			return make_result(
+				success=False,
+				account_index=account_index,
+				provider='AgentRouter',
+				account_name=account_name,
+				account_key=account_key,
+				error=login_payload.get('message') or '邮箱或密码错误',
+			)
+
+		login_data = login_payload.get('data', {})
+		if not isinstance(login_data, dict):
+			login_data = {}
+		if login_data.get('require_2fa'):
+			return make_result(
+				success=False,
+				account_index=account_index,
+				provider='AgentRouter',
+				account_name=account_name,
+				account_key=account_key,
+				error='账号启用了两步验证，自动签到暂不支持',
+			)
+
+		auth_headers: dict[str, str] = {}
+		access_token = login_data.get('access_token')
+		if isinstance(access_token, str) and access_token:
+			auth_headers['Authorization'] = f'Bearer {access_token}'
+		nested_user = login_data.get('user')
+		user_data = nested_user if isinstance(nested_user, dict) else login_data
+		user_id = int(user_data.get('id') or 0)
+		if not user_id:
+			return make_result(
+				success=False,
+				account_index=account_index,
+				provider='AgentRouter',
+				account_name=account_name,
+				account_key=account_key,
+				error='登录响应缺少用户 ID，无法核验系统签到日志',
+			)
+
+		await page.wait_for_timeout(500)
+		effective_login_time = get_agentrouter_login_reference_time(login_started_at, user_data.get('last_login_time'))
+		balance_after, balance_info = await get_agentrouter_user_info(page, account_name, user_id, auth_headers)
+		log_status, log_content = await verify_agentrouter_checkin_log(
+			page, effective_login_time, account_name, user_id, auth_headers
+		)
+		user_info = f'系统日志: {log_content}'
+		if balance_info:
+			user_info = f'{user_info}; {balance_info}'
+
+		if log_status == 'success':
+			print(f'[成功] {account_name}: {log_content}')
+			return make_result(
+				success=True,
+				account_index=account_index,
+				provider='AgentRouter',
+				account_name=account_name,
+				account_key=account_key,
+				user_info=user_info,
 				balance_after=balance_after,
 			)
+		if log_status == 'skipped':
+			print(f'[跳过] {account_name}: 今日系统日志已存在，本次登录未新增签到记录')
+			return make_result(
+				success=False,
+				account_index=account_index,
+				provider='AgentRouter',
+				account_name=account_name,
+				account_key=account_key,
+				user_info=user_info,
+				error='今日已签到',
+				balance_after=balance_after,
+			)
+
+		print(f'[失败] {log_content}')
+		return make_result(
+			success=False,
+			account_index=account_index,
+			provider='AgentRouter',
+			account_name=account_name,
+			account_key=account_key,
+			user_info=balance_info,
+			error=log_content,
+			balance_after=balance_after,
+		)
 	except Exception as e:
 		return make_result(
 			success=False,
@@ -1206,6 +1246,12 @@ async def check_in_agentrouter_account(account_info: AgentRouterAccountConfig, a
 			account_key=account_key,
 			error=f'处理异常: {str(e)[:100]}',
 		)
+	finally:
+		if context is not None:
+			try:
+				await context.close()
+			except Exception as e:
+				print(f'[警告] {account_name}: 关闭浏览器上下文失败 - {str(e)[:80]}')
 
 
 def make_anyrouter_failure(account: AccountConfig, account_index: int, error: str) -> CheckinResult:
@@ -1277,14 +1323,29 @@ def make_agentrouter_failure(account: AgentRouterAccountConfig, account_index: i
 
 
 async def run_agentrouter_checkins(accounts: list[AgentRouterAccountConfig]) -> list[CheckinResult]:
-	"""使用独立 HTTP 会话并发处理 AgentRouter 多账号。"""
+	"""在一个浏览器中使用独立同源 Context 并发处理 AgentRouter 多账号。"""
 	if not accounts:
 		return []
 	print(f'[系统] AgentRouter: 发现 {len(accounts)} 个账号')
-	raw_results = await asyncio.gather(
-		*(check_in_agentrouter_account(account, index) for index, account in enumerate(accounts)),
-		return_exceptions=True,
-	)
+	try:
+		async with async_playwright() as playwright:
+			browser = await playwright.chromium.launch(
+				headless=True,
+				args=['--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--no-sandbox'],
+			)
+			try:
+				raw_results = await asyncio.gather(
+					*(check_in_agentrouter_account(browser, account, index) for index, account in enumerate(accounts)),
+					return_exceptions=True,
+				)
+			finally:
+				await browser.close()
+	except Exception as e:
+		print(f'[失败] AgentRouter: 浏览器启动失败 - {str(e)[:100]}')
+		return [
+			make_agentrouter_failure(account, index, f'浏览器启动失败: {str(e)[:80]}')
+			for index, account in enumerate(accounts)
+		]
 
 	results: list[CheckinResult] = []
 	for index, raw_result in enumerate(raw_results):

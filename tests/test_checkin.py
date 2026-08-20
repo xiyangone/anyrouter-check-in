@@ -111,77 +111,76 @@ def test_load_account_configs_allow_either_provider(monkeypatch):
 
 
 def test_verify_agentrouter_checkin_log_requires_new_log_after_login():
-	class FakeResponse:
-		status_code = 200
-
-		def __init__(self, items):
-			self.items = items
-
-		def json(self):
-			return {'success': True, 'data': {'items': self.items}}
-
-	class FakeClient:
+	class FakePage:
 		def __init__(self, items):
 			self.items = items
 			self.calls = []
 
-		async def get(self, url, **kwargs):
-			self.calls.append((url, kwargs))
-			return FakeResponse(self.items)
+		async def evaluate(self, script, payload):
+			self.calls.append(payload)
+			return {
+				'status': 200,
+				'content_type': 'application/json',
+				'text': json.dumps({'success': True, 'data': {'items': self.items}}, ensure_ascii=False),
+				'url': f'https://agentrouter.org{payload["endpoint"]}',
+			}
 
-	client = FakeClient([{'created_at': 200, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}])
-	status, content = run_async(checkin.verify_agentrouter_checkin_log(client, 190, 'Agent 主账号', 38150))
+	page = FakePage([{'created_at': 200, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}])
+	status, content = run_async(checkin.verify_agentrouter_checkin_log(page, 190, 'Agent 主账号', 38150, {}))
 
 	assert status == 'success'
 	assert '每日签到成功' in content
-	assert 'type=4' in client.calls[0][0]
-	assert client.calls[0][1]['headers'] == {'New-Api-User': '38150'}
+	assert 'type=4' in page.calls[0]['endpoint']
+	assert page.calls[0]['headers'] == {'New-Api-User': '38150'}
 
 
 def test_get_agentrouter_user_info_sends_user_header():
-	class FakeResponse:
-		status_code = 200
-
-		def json(self):
-			return {'success': True, 'data': {'quota': 500000, 'used_quota': 0}}
-
-	class FakeClient:
+	class FakePage:
 		def __init__(self):
 			self.calls = []
 
-		async def get(self, url, **kwargs):
-			self.calls.append((url, kwargs))
-			return FakeResponse()
+		async def evaluate(self, script, payload):
+			self.calls.append(payload)
+			return {
+				'status': 200,
+				'content_type': 'application/json',
+				'text': json.dumps({'success': True, 'data': {'quota': 500000, 'used_quota': 0}}),
+				'url': f'https://agentrouter.org{payload["endpoint"]}',
+			}
 
-	client = FakeClient()
-	balance, info = run_async(checkin.get_agentrouter_user_info(client, 'Agent 主账号', 38150))
+	page = FakePage()
+	balance, info = run_async(checkin.get_agentrouter_user_info(page, 'Agent 主账号', 38150, {}))
 
 	assert balance == {'quota': 1.0, 'used_quota': 0.0}
 	assert info == '余额: $1.0, 已用: $0.0'
-	assert client.calls[0][1]['headers'] == {'New-Api-User': '38150'}
+	assert page.calls[0]['headers'] == {'New-Api-User': '38150'}
 
 
 def test_verify_agentrouter_checkin_log_marks_earlier_log_as_skipped(monkeypatch):
-	class FakeResponse:
-		status_code = 200
-
-		def json(self):
+	class FakePage:
+		async def evaluate(self, script, payload):
 			return {
-				'success': True,
-				'data': {
-					'items': [{'created_at': 100, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}]
-				},
+				'status': 200,
+				'content_type': 'application/json',
+				'text': json.dumps(
+					{
+						'success': True,
+						'data': {
+							'items': [
+								{'created_at': 100, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}
+							]
+						},
+					},
+					ensure_ascii=False,
+				),
+				'url': f'https://agentrouter.org{payload["endpoint"]}',
 			}
-
-	class FakeClient:
-		async def get(self, url, **kwargs):
-			return FakeResponse()
 
 	async def no_sleep(_delay):
 		return None
 
 	monkeypatch.setattr(checkin.asyncio, 'sleep', no_sleep)
-	status, _ = run_async(checkin.verify_agentrouter_checkin_log(FakeClient(), 190, 'Agent 主账号', 38150))
+	status, _ = run_async(checkin.verify_agentrouter_checkin_log(FakePage(), 190, 'Agent 主账号', 38150, {}))
 
 	assert status == 'skipped'
 
@@ -435,7 +434,7 @@ def test_readme_env_snippets_are_parsable(tmp_path: Path):
 def test_run_agentrouter_checkins_survives_unexpected_account_exception(monkeypatch):
 	"""即使账号级处理函数意外抛出，批次也必须逐账号降级而不是整批抛出。"""
 
-	async def exploding_checkin(account, index):
+	async def exploding_checkin(browser, account, index):
 		if index == 0:
 			raise RuntimeError('unexpected internal failure')
 		return checkin.make_result(
