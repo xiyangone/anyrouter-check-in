@@ -54,7 +54,7 @@
 
 #### AgentRouter
 
-AgentRouter（https://agentrouter.org/）直接配置登录邮箱和密码，不需要手动提取 Cookie：
+AgentRouter 直接配置登录邮箱和密码，不需要手动提取 Cookie。脚本使用官方公告提供、同时支持网页与 API 的备用域名 `https://ps.air-outer.com/`，避免主域名在自动化环境中偶发无法渲染登录入口：
 
 1. **Email**: AgentRouter 登录邮箱
 2. **Password**: AgentRouter 登录密码

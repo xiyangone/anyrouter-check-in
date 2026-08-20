@@ -24,7 +24,7 @@ from notify import notify
 
 # ============ 配置常量 ============
 ANYROUTER_BASE_URL = 'https://anyrouter.top'
-AGENTROUTER_BASE_URL = 'https://agentrouter.org'
+AGENTROUTER_BASE_URL = 'https://ps.air-outer.com'
 BEIJING_TZ = timezone(timedelta(hours=8))  # 北京时区 UTC+8
 WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 DEFAULT_TIMEOUT = 30.0
