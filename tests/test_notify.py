@@ -164,6 +164,20 @@ def test_missing_config():
 		kit.send_xizhi('测试', '测试')
 
 
+def test_checkin_notification_policy_defaults_to_failures_only():
+	kit = NotificationKit()
+
+	assert kit.should_send_checkin(success_count=1, skipped_count=1, total_count=2) is False
+	assert kit.should_send_checkin(success_count=1, skipped_count=0, total_count=2) is True
+
+
+def test_checkin_notification_policy_can_enable_success(monkeypatch):
+	monkeypatch.setenv('NOTIFY_ON_SUCCESS', 'true')
+	kit = NotificationKit()
+
+	assert kit.should_send_checkin(success_count=1, skipped_count=1, total_count=2) is True
+
+
 @patch('notify.NotificationKit.send_email')
 @patch('notify.NotificationKit.send_dingtalk')
 @patch('notify.NotificationKit.send_wecom')
@@ -218,7 +232,7 @@ def test_push_message_prefers_explicit_plain_text_for_non_html_channels(
 	plain_text = '执行时间: 2026-03-29 00:00:00 (北京时间)\n\n[成功] 账号 1'
 	notification_kit.push_message('测试标题', html_content, msg_type='html', text_content=plain_text)
 
-	assert mock_email.call_args.args == ('测试标题', html_content, 'html')
+	assert mock_email.call_args.args == ('测试标题', html_content, 'html', plain_text)
 	assert mock_xizhi.call_args.args == ('测试标题', plain_text)
 	assert mock_server_push.call_args.args == ('测试标题', plain_text)
 	assert mock_dingtalk.call_args.args == ('测试标题', plain_text, 'text')

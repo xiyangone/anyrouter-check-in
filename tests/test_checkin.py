@@ -43,7 +43,7 @@ def test_check_in_account_isolates_cookies_and_prefers_runtime_waf():
 			(account_name, headers['new-api-user'], client.cookies['session'], client.cookies['acw_tc'])
 		)
 		quota = 10.0 if call_counts[account_name] == 1 else 11.0
-		return {'quota': quota, 'used_quota': 0.0}, f"session={client.cookies['session']}"
+		return {'quota': quota, 'used_quota': 0.0}, f'session={client.cookies["session"]}'
 
 	async def fake_do_checkin_request(client, headers, account_name):
 		await asyncio.sleep(0)
@@ -88,29 +88,144 @@ def test_check_in_account_isolates_cookies_and_prefers_runtime_waf():
 	assert ('账号 2-sign-in', 'user-2', 'session-2', 'fresh-waf') in seen_cookies
 
 
-def test_main_keeps_other_results_when_one_account_raises():
+def test_load_account_configs_allow_either_provider(monkeypatch):
+	monkeypatch.delenv('ANYROUTER_ACCOUNTS', raising=False)
+	monkeypatch.setenv(
+		'AGENTROUTER_ACCOUNTS',
+		'[{"name":"Agent 主账号","email":"user@example.com","password":"secret"}]',
+	)
+
+	assert checkin.load_accounts() == []
+	assert checkin.load_agentrouter_accounts() == [
+		{'name': 'Agent 主账号', 'email': 'user@example.com', 'password': 'secret'}
+	]
+
+
+def test_verify_agentrouter_checkin_log_requires_new_log_after_login():
+	class FakeResponse:
+		status = 200
+
+		def __init__(self, items):
+			self.items = items
+
+		async def json(self):
+			return {'success': True, 'data': {'items': self.items}}
+
+	class FakeRequest:
+		def __init__(self, items):
+			self.items = items
+			self.calls = []
+
+		async def get(self, url, **kwargs):
+			self.calls.append((url, kwargs))
+			return FakeResponse(self.items)
+
+	class FakePage:
+		def __init__(self, items):
+			self.request = FakeRequest(items)
+
+	page = FakePage([{'created_at': 200, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}])
+	status, content = run_async(checkin.verify_agentrouter_checkin_log(page, 190, 'Agent 主账号', 38150))
+
+	assert status == 'success'
+	assert '每日签到成功' in content
+	assert 'type=4' in page.request.calls[0][0]
+	assert page.request.calls[0][1]['headers'] == {'New-Api-User': '38150'}
+
+
+def test_get_agentrouter_user_info_sends_user_header():
+	class FakeResponse:
+		status = 200
+
+		async def json(self):
+			return {'success': True, 'data': {'quota': 500000, 'used_quota': 0}}
+
+	class FakeRequest:
+		def __init__(self):
+			self.calls = []
+
+		async def get(self, url, **kwargs):
+			self.calls.append((url, kwargs))
+			return FakeResponse()
+
+	class FakePage:
+		def __init__(self):
+			self.request = FakeRequest()
+
+	page = FakePage()
+	balance, info = run_async(checkin.get_agentrouter_user_info(page, 'Agent 主账号', 38150))
+
+	assert balance == {'quota': 1.0, 'used_quota': 0.0}
+	assert info == '余额: $1.0, 已用: $0.0'
+	assert page.request.calls[0][1]['headers'] == {'New-Api-User': '38150'}
+
+
+def test_verify_agentrouter_checkin_log_marks_earlier_log_as_skipped(monkeypatch):
+	class FakeResponse:
+		status = 200
+
+		async def json(self):
+			return {
+				'success': True,
+				'data': {
+					'items': [{'created_at': 100, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}]
+				},
+			}
+
+	class FakeRequest:
+		async def get(self, url, **kwargs):
+			return FakeResponse()
+
+	class FakePage:
+		request = FakeRequest()
+
+	async def no_sleep(_delay):
+		return None
+
+	monkeypatch.setattr(checkin.asyncio, 'sleep', no_sleep)
+	status, _ = run_async(checkin.verify_agentrouter_checkin_log(FakePage(), 190, 'Agent 主账号', 38150))
+
+	assert status == 'skipped'
+
+
+def test_agentrouter_login_uses_latest_local_or_server_timestamp():
+	assert checkin.get_agentrouter_login_reference_time(200, 100) == 200
+	assert checkin.get_agentrouter_login_reference_time(200, 210) == 210
+	assert checkin.get_agentrouter_login_reference_time(200, 'invalid') == 200
+
+
+def test_main_combines_both_providers_and_respects_notify_policy():
 	captured: dict[str, Any] = {}
 
-	async def fake_get_all_waf_cookies(account_count):
-		assert account_count == 2
+	async def fake_run_anyrouter_checkins(accounts):
+		assert accounts[0]['api_user'] == 'user-1'
 		return [
-			{'acw_tc': 'waf-1', 'cdn_sec_tc': 'cdn-1', 'acw_sc__v2': 'v2-1'},
-			{'acw_tc': 'waf-2', 'cdn_sec_tc': 'cdn-2', 'acw_sc__v2': 'v2-2'},
+			{
+				'success': True,
+				'account_index': 0,
+				'user_info': '余额: $11.0, 已用: $0.0',
+				'error': None,
+				'balance_before': {'quota': 10.0, 'used_quota': 0.0},
+				'balance_after': {'quota': 11.0, 'used_quota': 0.0},
+				'provider': 'AnyRouter',
+				'account_name': 'Any 主账号',
+			}
 		]
 
-	async def fake_check_in_account(account_info, account_index, waf_cookies):
-		if account_index == 0:
-			raise RuntimeError('boom')
-		assert account_info['api_user'] == 'user-2'
-		assert waf_cookies['acw_tc'] == 'waf-2'
-		return {
-			'success': True,
-			'account_index': account_index,
-			'user_info': '余额: $11.0, 已用: $0.0',
-			'error': None,
-			'balance_before': {'quota': 10.0, 'used_quota': 0.0},
-			'balance_after': {'quota': 11.0, 'used_quota': 0.0},
-		}
+	async def fake_run_agentrouter_checkins(accounts):
+		assert accounts[0]['email'] == 'user@example.com'
+		return [
+			{
+				'success': False,
+				'account_index': 0,
+				'user_info': '系统日志: 今日已有签到记录',
+				'error': '今日已签到',
+				'balance_before': None,
+				'balance_after': {'quota': 832.65, 'used_quota': 4717.59},
+				'provider': 'AgentRouter',
+				'account_name': 'Agent 主账号',
+			}
+		]
 
 	def fake_build_html_notification(results, success_count, skipped_count, total_count):
 		captured['results'] = results
@@ -121,34 +236,37 @@ def test_main_keeps_other_results_when_one_account_raises():
 
 	def fake_build_plain_text_notification(results, success_count, skipped_count, total_count):
 		assert success_count == 1
-		assert skipped_count == 0
+		assert skipped_count == 1
 		assert total_count == 2
 		return 'plain-text-ok'
 
 	with (
 		patch(
 			'checkin.load_accounts',
-			return_value=[
-				{'cookies': {'session': 'session-1'}, 'api_user': 'user-1'},
-				{'cookies': {'session': 'session-2'}, 'api_user': 'user-2'},
-			],
+			return_value=[{'name': 'Any 主账号', 'cookies': {'session': 'session-1'}, 'api_user': 'user-1'}],
+		),
+		patch(
+			'checkin.load_agentrouter_accounts',
+			return_value=[{'name': 'Agent 主账号', 'email': 'user@example.com', 'password': 'secret'}],
 		),
 		patch('checkin.get_beijing_time', return_value='2026-03-29 00:00:00'),
-		patch('checkin.get_all_waf_cookies', fake_get_all_waf_cookies),
-		patch('checkin.check_in_account', fake_check_in_account),
+		patch('checkin.run_anyrouter_checkins', fake_run_anyrouter_checkins),
+		patch('checkin.run_agentrouter_checkins', fake_run_agentrouter_checkins),
 		patch('checkin.build_html_notification', side_effect=fake_build_html_notification),
 		patch('checkin.build_plain_text_notification', side_effect=fake_build_plain_text_notification),
+		patch.object(checkin.notify, 'should_send_checkin', return_value=False) as mock_should_send,
 		patch.object(checkin.notify, 'push_message') as mock_push_message,
 		patch('checkin.sys.exit') as mock_exit,
 	):
 		run_async(checkin.main())
 
 	assert captured['success_count'] == 1
-	assert captured['skipped_count'] == 0
+	assert captured['skipped_count'] == 1
 	assert captured['total_count'] == 2
-	assert isinstance(captured['results'][0], RuntimeError)
-	assert captured['results'][1]['success'] is True
-	mock_push_message.assert_called_once_with('AnyRouter 签到结果', '<html>ok</html>', msg_type='html', text_content='plain-text-ok')
+	assert captured['results'][0]['provider'] == 'AnyRouter'
+	assert captured['results'][1]['provider'] == 'AgentRouter'
+	mock_should_send.assert_called_once_with(1, 1, 2)
+	mock_push_message.assert_not_called()
 	mock_exit.assert_called_once_with(0)
 
 
@@ -172,7 +290,7 @@ def test_build_plain_text_notification_highlights_status_stats_and_details():
 
 	assert text == '\n'.join(
 		[
-			'✅ 全部账号签到成功',
+			'全部账号签到成功',
 			'时间：2026-03-30 09:54:49（北京时间）',
 			'',
 			'统计：',
@@ -181,7 +299,7 @@ def test_build_plain_text_notification_highlights_status_stats_and_details():
 			'- 失败：0/1',
 			'',
 			'明细：',
-			'1) 账号 1｜✅ 签到成功',
+			'1) [AnyRouter] 账号 1｜[成功]',
 			'   奖励：+$25.0',
 			'   余额：$2992.75｜已用：$207.25',
 		]

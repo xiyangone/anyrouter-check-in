@@ -16,6 +16,10 @@ class NotificationKit:
 	"""多平台通知工具类"""
 
 	def __init__(self) -> None:
+		self.reload_from_env()
+
+	def reload_from_env(self) -> None:
+		"""重新读取通知配置，支持 main() 先加载 .env 后再发送。"""
 		self.email_user: str = os.getenv('EMAIL_USER', '')
 		self.email_pass: str = os.getenv('EMAIL_PASS', '')
 		self.email_to: str = os.getenv('EMAIL_TO', '')
@@ -24,6 +28,20 @@ class NotificationKit:
 		self.dingding_webhook: str | None = os.getenv('DINGDING_WEBHOOK')
 		self.feishu_webhook: str | None = os.getenv('FEISHU_WEBHOOK')
 		self.weixin_webhook: str | None = os.getenv('WEIXIN_WEBHOOK')
+
+	@staticmethod
+	def _env_flag(name: str, default: bool = False) -> bool:
+		value = os.getenv(name)
+		if value is None or not value.strip():
+			return default
+		return value.strip().lower() in {'1', 'true', 'yes', 'on', 'y'}
+
+	def should_send_checkin(self, success_count: int, skipped_count: int, total_count: int) -> bool:
+		"""失败始终通知；成功/今日已签由 NOTIFY_ON_SUCCESS 控制。"""
+		fail_count = max(total_count - success_count - skipped_count, 0)
+		if fail_count > 0:
+			return True
+		return self._env_flag('NOTIFY_ON_SUCCESS', default=False)
 
 	@staticmethod
 	def _html_to_text(content: str) -> str:
@@ -40,7 +58,13 @@ class NotificationKit:
 		text = re.sub(r'\n{3,}', '\n\n', text).strip()
 		return text or '(无内容)'
 
-	def send_email(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> str:
+	def send_email(
+		self,
+		title: str,
+		content: str,
+		msg_type: Literal['text', 'html'] = 'text',
+		plain_text_content: str | None = None,
+	) -> str:
 		"""发送邮件通知"""
 		if not self.email_user or not self.email_pass or not self.email_to:
 			raise ValueError('未配置邮箱信息')
@@ -50,12 +74,13 @@ class NotificationKit:
 			content = '(无内容)'
 
 		msg = MIMEMultipart('alternative')
-		msg['From'] = f'AnyRouter Assistant <{self.email_user}>'
+		msg['From'] = f'Router Assistant <{self.email_user}>'
 		msg['To'] = self.email_to
 		msg['Subject'] = title
 
 		# 同时添加纯文本和 HTML 版本，确保兼容性
-		text_part = MIMEText(content, 'plain', 'utf-8')
+		plain_text = plain_text_content or (self._html_to_text(content) if msg_type == 'html' else content)
+		text_part = MIMEText(plain_text, 'plain', 'utf-8')
 		msg.attach(text_part)
 
 		# 如果是 HTML 格式，额外添加 HTML 版本
@@ -160,14 +185,25 @@ class NotificationKit:
 		text_content: str | None = None,
 	) -> None:
 		"""推送消息到所有已配置的通知渠道"""
+		self.reload_from_env()
 		html_content = content if msg_type == 'html' else content.replace('\n', '<br>')
-		plain_text_content = text_content.strip() if text_content and text_content.strip() else (
-			self._html_to_text(content) if msg_type == 'html' else content
+		plain_text_content = (
+			text_content.strip()
+			if text_content and text_content.strip()
+			else (self._html_to_text(content) if msg_type == 'html' else content)
 		)
 		markdown_content = plain_text_content
 
 		notifications: list[tuple[str, Callable[[], str]]] = [
-			('Email', lambda: self.send_email(title, html_content if msg_type == 'html' else plain_text_content, msg_type)),
+			(
+				'Email',
+				lambda: self.send_email(
+					title,
+					html_content if msg_type == 'html' else plain_text_content,
+					msg_type,
+					plain_text_content,
+				),
+			),
 			('Xizhi', lambda: self.send_xizhi(title, plain_text_content)),
 			('Server Push', lambda: self.send_serverPush(title, markdown_content)),
 			('DingTalk', lambda: self.send_dingtalk(title, plain_text_content, 'text')),
