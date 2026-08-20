@@ -18,7 +18,10 @@ jobs:
       EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job needs the checkout token for the keepalive push.
+          persist-credentials: true
 
       - name: Create keepalive commit
         run: |

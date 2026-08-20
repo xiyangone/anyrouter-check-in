@@ -3,8 +3,17 @@
 .env
 .venv
 __pycache__
+*.py[cod]
 .pytest_cache
 .ruff_cache
+.mypy_cache
+.pyright
+.coverage
+coverage.xml
+htmlcov
+build
+dist
+*.egg-info
 
 # WAF cookies 缓存文件
 .waf_cache.json
