@@ -112,15 +112,15 @@ def test_load_account_configs_allow_either_provider(monkeypatch):
 
 def test_verify_agentrouter_checkin_log_requires_new_log_after_login():
 	class FakeResponse:
-		status = 200
+		status_code = 200
 
 		def __init__(self, items):
 			self.items = items
 
-		async def json(self):
+		def json(self):
 			return {'success': True, 'data': {'items': self.items}}
 
-	class FakeRequest:
+	class FakeClient:
 		def __init__(self, items):
 			self.items = items
 			self.calls = []
@@ -129,27 +129,23 @@ def test_verify_agentrouter_checkin_log_requires_new_log_after_login():
 			self.calls.append((url, kwargs))
 			return FakeResponse(self.items)
 
-	class FakePage:
-		def __init__(self, items):
-			self.request = FakeRequest(items)
-
-	page = FakePage([{'created_at': 200, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}])
-	status, content = run_async(checkin.verify_agentrouter_checkin_log(page, 190, 'Agent 主账号', 38150))
+	client = FakeClient([{'created_at': 200, 'type': 4, 'content': '每日签到成功，增加额度 ＄25.000000 额度'}])
+	status, content = run_async(checkin.verify_agentrouter_checkin_log(client, 190, 'Agent 主账号', 38150))
 
 	assert status == 'success'
 	assert '每日签到成功' in content
-	assert 'type=4' in page.request.calls[0][0]
-	assert page.request.calls[0][1]['headers'] == {'New-Api-User': '38150'}
+	assert 'type=4' in client.calls[0][0]
+	assert client.calls[0][1]['headers'] == {'New-Api-User': '38150'}
 
 
 def test_get_agentrouter_user_info_sends_user_header():
 	class FakeResponse:
-		status = 200
+		status_code = 200
 
-		async def json(self):
+		def json(self):
 			return {'success': True, 'data': {'quota': 500000, 'used_quota': 0}}
 
-	class FakeRequest:
+	class FakeClient:
 		def __init__(self):
 			self.calls = []
 
@@ -157,23 +153,19 @@ def test_get_agentrouter_user_info_sends_user_header():
 			self.calls.append((url, kwargs))
 			return FakeResponse()
 
-	class FakePage:
-		def __init__(self):
-			self.request = FakeRequest()
-
-	page = FakePage()
-	balance, info = run_async(checkin.get_agentrouter_user_info(page, 'Agent 主账号', 38150))
+	client = FakeClient()
+	balance, info = run_async(checkin.get_agentrouter_user_info(client, 'Agent 主账号', 38150))
 
 	assert balance == {'quota': 1.0, 'used_quota': 0.0}
 	assert info == '余额: $1.0, 已用: $0.0'
-	assert page.request.calls[0][1]['headers'] == {'New-Api-User': '38150'}
+	assert client.calls[0][1]['headers'] == {'New-Api-User': '38150'}
 
 
 def test_verify_agentrouter_checkin_log_marks_earlier_log_as_skipped(monkeypatch):
 	class FakeResponse:
-		status = 200
+		status_code = 200
 
-		async def json(self):
+		def json(self):
 			return {
 				'success': True,
 				'data': {
@@ -181,18 +173,15 @@ def test_verify_agentrouter_checkin_log_marks_earlier_log_as_skipped(monkeypatch
 				},
 			}
 
-	class FakeRequest:
+	class FakeClient:
 		async def get(self, url, **kwargs):
 			return FakeResponse()
-
-	class FakePage:
-		request = FakeRequest()
 
 	async def no_sleep(_delay):
 		return None
 
 	monkeypatch.setattr(checkin.asyncio, 'sleep', no_sleep)
-	status, _ = run_async(checkin.verify_agentrouter_checkin_log(FakePage(), 190, 'Agent 主账号', 38150))
+	status, _ = run_async(checkin.verify_agentrouter_checkin_log(FakeClient(), 190, 'Agent 主账号', 38150))
 
 	assert status == 'skipped'
 
@@ -201,64 +190,6 @@ def test_agentrouter_login_uses_latest_local_or_server_timestamp():
 	assert checkin.get_agentrouter_login_reference_time(200, 100) == 200
 	assert checkin.get_agentrouter_login_reference_time(200, 210) == 210
 	assert checkin.get_agentrouter_login_reference_time(200, 'invalid') == 200
-
-
-def test_prepare_agentrouter_login_form_waits_for_delayed_spa_render(monkeypatch):
-	"""SPA 延迟挂载邮箱入口时，不应在首轮探测后立即失败。"""
-
-	class FakeLocator:
-		def __init__(self, *, visible=None, visible_after=0):
-			self.visible = visible or (lambda: True)
-			self.visible_after = visible_after
-			self.probes = 0
-			self.clicked = False
-
-		@property
-		def first(self):
-			return self
-
-		async def count(self):
-			self.probes += 1
-			return int(self.probes > self.visible_after)
-
-		async def is_visible(self):
-			return self.visible()
-
-		async def click(self):
-			self.clicked = True
-
-	class FakePage:
-		def __init__(self):
-			self.email_button = FakeLocator(visible_after=2)
-			self.username = FakeLocator(visible=lambda: self.email_button.clicked)
-			self.password = FakeLocator(visible=lambda: self.email_button.clicked)
-			self.submit = FakeLocator(visible=lambda: self.email_button.clicked)
-			self.missing = FakeLocator(visible=lambda: False)
-
-		def locator(self, selector):
-			return {
-				'#username': self.username,
-				'#password': self.password,
-				'form.semi-form button[type="submit"]': self.submit,
-			}.get(selector, self.missing)
-
-		def get_by_role(self, role, name):
-			if role == 'button' and name.pattern.startswith('使用'):
-				return self.email_button
-			return self.missing
-
-	async def no_wait():
-		return None
-
-	page = FakePage()
-	monkeypatch.setattr(checkin, 'page_wait_interval', no_wait)
-	username, password, submit = run_async(checkin.prepare_agentrouter_login_form(cast(Any, page)))
-
-	assert page.email_button.probes == 3
-	assert page.email_button.clicked is True
-	assert username is page.username
-	assert password is page.password
-	assert submit is page.submit
 
 
 def test_main_combines_both_providers_and_respects_notify_policy():
@@ -501,103 +432,10 @@ def test_readme_env_snippets_are_parsable(tmp_path: Path):
 		assert assert_dotenv_accounts_are_loadable(env_path), f'README 第 {index + 1} 段示例未解析出账号配置'
 
 
-class ExplodingBrowser:
-	"""第 1 个账号建 context 即失败，第 2 个正常返回可用 context。"""
-
-	def __init__(self):
-		self.contexts_created = 0
-		self.closed = False
-
-	async def new_context(self, **kwargs):
-		self.contexts_created += 1
-		if self.contexts_created == 1:
-			raise RuntimeError('Target page, context or browser has been closed')
-		return ExplodingContext()
-
-	async def close(self):
-		self.closed = True
-
-
-class ExplodingContext:
-	def __init__(self):
-		self.closed = False
-
-	async def new_page(self):
-		return ExplodingPage()
-
-	async def close(self):
-		self.closed = True
-
-
-class ExplodingPage:
-	async def goto(self, *args, **kwargs):
-		raise RuntimeError('net::ERR_ABORTED')
-
-
-def test_agentrouter_account_failure_is_isolated_per_account():
-	"""单个 AgentRouter 账号的浏览器异常不得让整批抛出。"""
-	browser: Any = ExplodingBrowser()
-	accounts: list[Any] = [
-		{'email': 'first@example.com', 'password': 'p1'},
-		{'email': 'second@example.com', 'password': 'p2'},
-	]
-
-	async def gather_all():
-		return await asyncio.gather(
-			*(checkin.check_in_agentrouter_account(browser, account, index) for index, account in enumerate(accounts))
-		)
-
-	results: list[Any] = run_async(gather_all())
-
-	assert len(results) == 2
-	assert all(result['success'] is False for result in results)
-	assert all(result['provider'] == 'AgentRouter' for result in results)
-	assert '处理异常' in (results[0]['error'] or '')
-
-
-def test_run_agentrouter_checkins_survives_browser_launch_failure(monkeypatch):
-	"""浏览器启动失败时须逐账号记为失败，而不是让异常打掉整轮签到与通知。"""
-
-	class FailingPlaywright:
-		async def __aenter__(self):
-			raise RuntimeError('Executable does not exist')
-
-		async def __aexit__(self, exc_type, exc, tb):
-			return False
-
-	monkeypatch.setattr(checkin, 'async_playwright', lambda: FailingPlaywright())
-	accounts: list[Any] = [
-		{'email': 'a@example.com', 'password': 'p'},
-		{'name': '自定义号', 'email': 'b@example.com', 'password': 'p'},
-	]
-
-	results: list[Any] = run_async(checkin.run_agentrouter_checkins(accounts))
-
-	assert len(results) == 2
-	assert all(result['success'] is False for result in results)
-	assert all('浏览器启动失败' in (result['error'] or '') for result in results)
-	assert results[0]['account_name'] == 'a***@example.com'
-	assert results[1]['account_name'] == '自定义号'
-
-
 def test_run_agentrouter_checkins_survives_unexpected_account_exception(monkeypatch):
 	"""即使账号级处理函数意外抛出，批次也必须逐账号降级而不是整批抛出。"""
 
-	class WorkingPlaywright:
-		async def __aenter__(self):
-			return self
-
-		async def __aexit__(self, exc_type, exc, tb):
-			return False
-
-		@property
-		def chromium(self):
-			return self
-
-		async def launch(self, **kwargs):
-			return ExplodingBrowser()
-
-	async def exploding_checkin(browser, account, index):
+	async def exploding_checkin(account, index):
 		if index == 0:
 			raise RuntimeError('unexpected internal failure')
 		return checkin.make_result(
@@ -607,7 +445,6 @@ def test_run_agentrouter_checkins_survives_unexpected_account_exception(monkeypa
 			account_name=checkin.get_agentrouter_account_name(account, index),
 		)
 
-	monkeypatch.setattr(checkin, 'async_playwright', lambda: WorkingPlaywright())
 	monkeypatch.setattr(checkin, 'check_in_agentrouter_account', exploding_checkin)
 
 	accounts: list[Any] = [

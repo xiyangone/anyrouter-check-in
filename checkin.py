@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,8 +16,7 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import httpx
 from dotenv import load_dotenv
-from playwright.async_api import Browser, Locator, Page, async_playwright
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import Browser, async_playwright
 
 from notify import notify
 
@@ -30,9 +28,6 @@ WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0
-AGENTROUTER_LOGIN_TIMEOUT_MS = 60_000
-AGENTROUTER_LOGIN_FORM_TIMEOUT_MS = 20_000
-AGENTROUTER_TURNSTILE_TIMEOUT_MS = 30_000
 AGENTROUTER_LOG_RETRIES = 5
 AGENTROUTER_LOG_RETRY_DELAY = 1.0
 AGENTROUTER_SYSTEM_LOG_TYPE = 4
@@ -992,126 +987,24 @@ def get_agentrouter_login_reference_time(login_started_at: int, server_login_tim
 	return max(login_started_at, parsed_server_time)
 
 
-async def first_visible_locator(*locators: Locator) -> Locator | None:
-	"""返回第一项可见定位器。"""
-	for locator in locators:
-		candidate = locator.first
-		if await candidate.count() > 0 and await candidate.is_visible():
-			return candidate
-	return None
-
-
-async def wait_for_first_visible_locator(*locators: Locator, timeout_ms: int) -> Locator | None:
-	"""等待 SPA 渲染，并返回第一项可见定位器。"""
-	loop = asyncio.get_running_loop()
-	deadline = loop.time() + timeout_ms / 1000
-	while loop.time() < deadline:
-		candidate = await first_visible_locator(*locators)
-		if candidate is not None:
-			return candidate
-		await page_wait_interval()
-	return None
-
-
-async def page_wait_interval() -> None:
-	"""登录页短轮询间隔，单独封装便于测试。"""
-	await asyncio.sleep(0.1)
-
-
-async def prepare_agentrouter_login_form(page: Page) -> tuple[Locator, Locator, Locator]:
-	"""展开 AgentRouter 邮箱登录方式并返回表单定位器。"""
-	username_locators = (
-		page.locator('#username'),
-		page.locator('input[name="username"]'),
-		page.locator('input[name="email"]'),
-		page.get_by_role('textbox', name=re.compile(r'用户名或邮箱|邮箱|Email|Username', re.I)),
-	)
-	email_login_locators = (
-		page.get_by_role('button', name=re.compile(r'使用\s*(邮箱或用户名|Email or Username)\s*登录', re.I)),
-		page.get_by_role('button', name=re.compile(r'邮箱或用户名|Email or Username', re.I)),
-		page.get_by_role('button', name=re.compile(r'邮箱|Email', re.I)),
-	)
-
-	username: Locator | None = None
-	email_login_button: Locator | None = None
-	loop = asyncio.get_running_loop()
-	deadline = loop.time() + AGENTROUTER_LOGIN_FORM_TIMEOUT_MS / 1000
-	while loop.time() < deadline and username is None and email_login_button is None:
-		username = await first_visible_locator(*username_locators)
-		if username is None:
-			email_login_button = await first_visible_locator(*email_login_locators)
-		if username is None and email_login_button is None:
-			await page_wait_interval()
-
-	if username is None:
-		if email_login_button is None:
-			raise RuntimeError(f'等待 {AGENTROUTER_LOGIN_FORM_TIMEOUT_MS // 1000} 秒后仍未找到邮箱登录入口或登录表单')
-		await email_login_button.click()
-		username = await wait_for_first_visible_locator(
-			*username_locators,
-			timeout_ms=AGENTROUTER_LOGIN_FORM_TIMEOUT_MS,
-		)
-
-	password = await wait_for_first_visible_locator(
-		page.locator('#password'),
-		page.locator('input[name="password"]'),
-		page.get_by_role('textbox', name=re.compile(r'密码|Password', re.I)),
-		timeout_ms=AGENTROUTER_LOGIN_FORM_TIMEOUT_MS,
-	)
-	submit = await wait_for_first_visible_locator(
-		page.locator('form.semi-form button[type="submit"]'),
-		page.locator('form button[type="submit"]'),
-		page.get_by_role('button', name=re.compile(r'^继续$|^登录$|Continue|Sign in', re.I)),
-		timeout_ms=AGENTROUTER_LOGIN_FORM_TIMEOUT_MS,
-	)
-	missing_fields = [
-		label
-		for label, locator in (('用户名或邮箱', username), ('密码', password), ('继续按钮', submit))
-		if locator is None
-	]
-	if missing_fields:
-		raise RuntimeError(f'AgentRouter 登录表单结构不完整，缺少: {", ".join(missing_fields)}')
-	assert username is not None
-	assert password is not None
-	assert submit is not None
-	return username, password, submit
-
-
-async def wait_for_agentrouter_turnstile(page: Page) -> None:
-	"""Turnstile 启用时等待页面正常生成 token，不尝试绕过交互挑战。"""
-	token_input = page.locator('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]')
-	turnstile_frame = page.locator('iframe[src*="challenges.cloudflare.com"], .cf-turnstile')
-	if await token_input.count() == 0 and await turnstile_frame.count() == 0:
-		return
-
-	print('[信息] AgentRouter: 等待 Turnstile 验证...')
-	await page.wait_for_function(
-		"""() => {
-			const input = document.querySelector(
-				'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
-			);
-			return Boolean(input && input.value);
-		}""",
-		timeout=AGENTROUTER_TURNSTILE_TIMEOUT_MS,
-	)
-
-
 async def get_agentrouter_user_info(
-	page: Any, account_name: str, user_id: int
+	client: Any, account_name: str, user_id: int
 ) -> tuple[BalanceInfo | None, str | None]:
-	"""使用登录后的浏览器会话读取 AgentRouter 真实余额。"""
+	"""使用登录后的 HTTP 会话读取 AgentRouter 真实余额。"""
 	try:
-		response = await page.request.get(
-			f'{AGENTROUTER_BASE_URL}/api/user/self',
+		response = await client.get(
+			'/api/user/self',
 			headers={'New-Api-User': str(user_id)},
-			timeout=DEFAULT_TIMEOUT * 1000,
+			timeout=DEFAULT_TIMEOUT,
 		)
-		if response.status != 200:
+		if response.status_code != 200:
 			return None, None
-		payload = await response.json()
+		payload = response.json()
 		if not payload.get('success'):
 			return None, None
 		user_data = payload.get('data', {})
+		if isinstance(user_data, dict) and isinstance(user_data.get('user'), dict):
+			user_data = user_data['user']
 		quota = round(float(user_data.get('quota', 0)) / QUOTA_PER_UNIT, 2)
 		used_quota = round(float(user_data.get('used_quota', 0)) / QUOTA_PER_UNIT, 2)
 		return BalanceInfo(quota=quota, used_quota=used_quota), f'余额: ${quota}, 已用: ${used_quota}'
@@ -1121,7 +1014,7 @@ async def get_agentrouter_user_info(
 
 
 async def verify_agentrouter_checkin_log(
-	page: Any, login_started_at: int, account_name: str, user_id: int
+	client: Any, login_started_at: int, account_name: str, user_id: int
 ) -> tuple[str, str]:
 	"""通过系统日志验证本次登录是否真的产生了签到额度。"""
 	now = datetime.now(BEIJING_TZ)
@@ -1141,14 +1034,14 @@ async def verify_agentrouter_checkin_log(
 	latest_today_log: str | None = None
 
 	for attempt in range(AGENTROUTER_LOG_RETRIES):
-		response = await page.request.get(
-			f'{AGENTROUTER_BASE_URL}/api/log/self?{query}',
+		response = await client.get(
+			f'/api/log/self?{query}',
 			headers={'New-Api-User': str(user_id)},
-			timeout=DEFAULT_TIMEOUT * 1000,
+			timeout=DEFAULT_TIMEOUT,
 		)
-		if response.status != 200:
-			raise RuntimeError(f'系统日志接口 HTTP {response.status}')
-		payload = await response.json()
+		if response.status_code != 200:
+			raise RuntimeError(f'系统日志接口 HTTP {response.status_code}')
+		payload = response.json()
 		if not payload.get('success'):
 			raise RuntimeError(payload.get('message') or '系统日志接口返回失败')
 
@@ -1170,10 +1063,8 @@ async def verify_agentrouter_checkin_log(
 	return 'failed', f'{account_name}: 登录成功，但未找到今日签到到账系统日志'
 
 
-async def check_in_agentrouter_account(
-	browser: Browser, account_info: AgentRouterAccountConfig, account_index: int
-) -> CheckinResult:
-	"""登录 AgentRouter，并以系统日志而非站点 toast/checked_in 字段确认签到。"""
+async def check_in_agentrouter_account(account_info: AgentRouterAccountConfig, account_index: int) -> CheckinResult:
+	"""调用 AgentRouter 官方登录 API，并以系统日志确认实际签到。"""
 	account_name = get_agentrouter_account_name(account_info, account_index)
 	email = account_info.get('email', '')
 	password = account_info.get('password', '')
@@ -1181,129 +1072,115 @@ async def check_in_agentrouter_account(
 	print(f'\n[处理中] AgentRouter: {account_name}')
 	print(f'[信息] {account_name}: 邮箱 {mask_email(email) or "(格式异常)"}')
 
-	context = None
 	try:
-		context = await browser.new_context(
-			user_agent=DEFAULT_USER_AGENT,
-			viewport={'width': 1440, 'height': 1000},
-		)
-		page = await context.new_page()
-		await page.goto(
-			f'{AGENTROUTER_BASE_URL}/login', wait_until='domcontentloaded', timeout=AGENTROUTER_LOGIN_TIMEOUT_MS
-		)
-		username_input, password_input, submit_button = await prepare_agentrouter_login_form(page)
-		await username_input.fill(email)
-		await password_input.fill(password)
-		await wait_for_agentrouter_turnstile(page)
+		async with httpx.AsyncClient(
+			base_url=AGENTROUTER_BASE_URL,
+			timeout=DEFAULT_TIMEOUT,
+			follow_redirects=True,
+			headers={'User-Agent': DEFAULT_USER_AGENT, 'Accept': 'application/json'},
+		) as client:
+			login_started_at = int(time.time())
+			login_response = await client.post(
+				'/api/user/login?turnstile=',
+				json={'username': email, 'password': password},
+			)
+			if login_response.status_code != 200:
+				return make_result(
+					success=False,
+					account_index=account_index,
+					provider='AgentRouter',
+					account_name=account_name,
+					account_key=account_key,
+					error=f'登录失败 (HTTP {login_response.status_code})',
+				)
 
-		login_started_at = int(time.time())
-		try:
-			async with page.expect_response(
-				lambda response: '/api/user/login' in response.url and response.request.method == 'POST',
-				timeout=AGENTROUTER_LOGIN_TIMEOUT_MS,
-			) as response_info:
-				await submit_button.click()
-			login_response = await response_info.value
-		except PlaywrightTimeoutError:
+			login_payload = login_response.json()
+			if not login_payload.get('success'):
+				return make_result(
+					success=False,
+					account_index=account_index,
+					provider='AgentRouter',
+					account_name=account_name,
+					account_key=account_key,
+					error=login_payload.get('message') or '邮箱或密码错误',
+				)
+
+			login_data = login_payload.get('data', {})
+			if not isinstance(login_data, dict):
+				login_data = {}
+			if login_data.get('require_2fa'):
+				return make_result(
+					success=False,
+					account_index=account_index,
+					provider='AgentRouter',
+					account_name=account_name,
+					account_key=account_key,
+					error='账号启用了两步验证，自动签到暂不支持',
+				)
+
+			access_token = login_data.get('access_token')
+			if isinstance(access_token, str) and access_token:
+				client.headers['Authorization'] = f'Bearer {access_token}'
+			nested_user = login_data.get('user')
+			user_data = nested_user if isinstance(nested_user, dict) else login_data
+			user_id = int(user_data.get('id') or 0)
+			if not user_id:
+				return make_result(
+					success=False,
+					account_index=account_index,
+					provider='AgentRouter',
+					account_name=account_name,
+					account_key=account_key,
+					error='登录响应缺少用户 ID，无法核验系统签到日志',
+				)
+
+			await asyncio.sleep(0.5)
+			effective_login_time = get_agentrouter_login_reference_time(
+				login_started_at, user_data.get('last_login_time')
+			)
+			balance_after, balance_info = await get_agentrouter_user_info(client, account_name, user_id)
+			log_status, log_content = await verify_agentrouter_checkin_log(
+				client, effective_login_time, account_name, user_id
+			)
+			user_info = f'系统日志: {log_content}'
+			if balance_info:
+				user_info = f'{user_info}; {balance_info}'
+
+			if log_status == 'success':
+				print(f'[成功] {account_name}: {log_content}')
+				return make_result(
+					success=True,
+					account_index=account_index,
+					provider='AgentRouter',
+					account_name=account_name,
+					account_key=account_key,
+					user_info=user_info,
+					balance_after=balance_after,
+				)
+			if log_status == 'skipped':
+				print(f'[跳过] {account_name}: 今日系统日志已存在，本次登录未新增签到记录')
+				return make_result(
+					success=False,
+					account_index=account_index,
+					provider='AgentRouter',
+					account_name=account_name,
+					account_key=account_key,
+					user_info=user_info,
+					error='今日已签到',
+					balance_after=balance_after,
+				)
+
+			print(f'[失败] {log_content}')
 			return make_result(
 				success=False,
 				account_index=account_index,
 				provider='AgentRouter',
 				account_name=account_name,
 				account_key=account_key,
-				error='登录请求超时，未捕获 /api/user/login 响应',
-			)
-
-		if login_response.status != 200:
-			return make_result(
-				success=False,
-				account_index=account_index,
-				provider='AgentRouter',
-				account_name=account_name,
-				account_key=account_key,
-				error=f'登录失败 (HTTP {login_response.status})',
-			)
-
-		login_payload = await login_response.json()
-		if not login_payload.get('success'):
-			return make_result(
-				success=False,
-				account_index=account_index,
-				provider='AgentRouter',
-				account_name=account_name,
-				account_key=account_key,
-				error=login_payload.get('message') or '邮箱或密码错误',
-			)
-
-		await page.wait_for_timeout(500)
-		user_id = int(login_payload.get('data', {}).get('id') or 0)
-		if not user_id:
-			return make_result(
-				success=False,
-				account_index=account_index,
-				provider='AgentRouter',
-				account_name=account_name,
-				account_key=account_key,
-				error='登录响应缺少用户 ID，无法核验系统签到日志',
-			)
-
-		# 某些部署返回的是“上一次登录时间”；取本地提交时间与服务端时间的较晚值，
-		# 避免当天的旧签到日志因服务端时间过旧而被误判为本次新增。
-		effective_login_time = get_agentrouter_login_reference_time(
-			login_started_at, login_payload.get('data', {}).get('last_login_time')
-		)
-		balance_after, balance_info = await get_agentrouter_user_info(page, account_name, user_id)
-		log_status, log_content = await verify_agentrouter_checkin_log(
-			page, effective_login_time, account_name, user_id
-		)
-		user_info = f'系统日志: {log_content}'
-		if balance_info:
-			user_info = f'{user_info}; {balance_info}'
-
-		if log_status == 'success':
-			print(f'[成功] {account_name}: {log_content}')
-			return make_result(
-				success=True,
-				account_index=account_index,
-				provider='AgentRouter',
-				account_name=account_name,
-				account_key=account_key,
-				user_info=user_info,
+				user_info=balance_info,
+				error=log_content,
 				balance_after=balance_after,
 			)
-		if log_status == 'skipped':
-			print(f'[跳过] {account_name}: 今日系统日志已存在，本次登录未新增签到记录')
-			return make_result(
-				success=False,
-				account_index=account_index,
-				provider='AgentRouter',
-				account_name=account_name,
-				account_key=account_key,
-				user_info=user_info,
-				error='今日已签到',
-				balance_after=balance_after,
-			)
-
-		print(f'[失败] {log_content}')
-		return make_result(
-			success=False,
-			account_index=account_index,
-			provider='AgentRouter',
-			account_name=account_name,
-			account_key=account_key,
-			user_info=balance_info,
-			error=log_content,
-			balance_after=balance_after,
-		)
-	except PlaywrightTimeoutError as e:
-		return make_result(
-			success=False,
-			account_index=account_index,
-			provider='AgentRouter',
-			account_name=account_name,
-			account_key=account_key,
-			error=f'页面或 Turnstile 等待超时: {str(e)[:80]}',
-		)
 	except Exception as e:
 		return make_result(
 			success=False,
@@ -1313,12 +1190,6 @@ async def check_in_agentrouter_account(
 			account_key=account_key,
 			error=f'处理异常: {str(e)[:100]}',
 		)
-	finally:
-		if context is not None:
-			try:
-				await context.close()
-			except Exception as e:
-				print(f'[警告] {account_name}: 关闭浏览器上下文失败 - {str(e)[:80]}')
 
 
 def make_anyrouter_failure(account: AccountConfig, account_index: int, error: str) -> CheckinResult:
@@ -1390,33 +1261,14 @@ def make_agentrouter_failure(account: AgentRouterAccountConfig, account_index: i
 
 
 async def run_agentrouter_checkins(accounts: list[AgentRouterAccountConfig]) -> list[CheckinResult]:
-	"""在一个浏览器中使用独立 Context 并发处理 AgentRouter 多账号。"""
+	"""使用独立 HTTP 会话并发处理 AgentRouter 多账号。"""
 	if not accounts:
 		return []
 	print(f'[系统] AgentRouter: 发现 {len(accounts)} 个账号')
-	try:
-		async with async_playwright() as playwright:
-			browser = await playwright.chromium.launch(
-				headless=True,
-				args=['--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--no-sandbox'],
-			)
-			try:
-				raw_results = await asyncio.gather(
-					*(check_in_agentrouter_account(browser, account, index) for index, account in enumerate(accounts)),
-					return_exceptions=True,
-				)
-			finally:
-				try:
-					await browser.close()
-				except Exception as e:
-					print(f'[警告] AgentRouter: 关闭浏览器失败 - {str(e)[:80]}')
-	except Exception as e:
-		# 浏览器无法启动时，逐账号记为失败，避免打掉 AnyRouter 已收集的结果与失败通知。
-		print(f'[失败] AgentRouter: 浏览器启动失败 - {str(e)[:100]}')
-		return [
-			make_agentrouter_failure(account, index, f'浏览器启动失败: {str(e)[:80]}')
-			for index, account in enumerate(accounts)
-		]
+	raw_results = await asyncio.gather(
+		*(check_in_agentrouter_account(account, index) for index, account in enumerate(accounts)),
+		return_exceptions=True,
+	)
 
 	results: list[CheckinResult] = []
 	for index, raw_result in enumerate(raw_results):
