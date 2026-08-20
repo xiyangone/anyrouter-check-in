@@ -750,13 +750,19 @@ async def check_in_account(
 
 def get_agentrouter_account_name(account: AgentRouterAccountConfig, account_index: int) -> str:
 	"""优先使用自定义名称，否则显示脱敏邮箱。"""
-	name = account.get('name', '').strip()
-	if name:
-		return name
-	email = account.get('email', '')
+	name = account.get('name')
+	if isinstance(name, str) and name.strip():
+		return name.strip()
+	return mask_email(account.get('email', '')) or f'账号 {account_index + 1}'
+
+
+def mask_email(email: Any) -> str:
+	"""脱敏邮箱，非法输入返回空字符串。"""
+	if not isinstance(email, str):
+		return ''
 	local, separator, domain = email.partition('@')
 	if not separator:
-		return f'账号 {account_index + 1}'
+		return ''
 	visible_local = local[:2] if len(local) > 2 else local[:1]
 	return f'{visible_local}***@{domain}'
 
@@ -916,14 +922,15 @@ async def check_in_agentrouter_account(
 	email = account_info.get('email', '')
 	password = account_info.get('password', '')
 	print(f'\n[处理中] AgentRouter: {account_name}')
-	print(f'[信息] {account_name}: 邮箱 {get_agentrouter_account_name(account_info, account_index)}')
+	print(f'[信息] {account_name}: 邮箱 {mask_email(email) or "(格式异常)"}')
 
-	context = await browser.new_context(
-		user_agent=DEFAULT_USER_AGENT,
-		viewport={'width': 1440, 'height': 1000},
-	)
-	page = await context.new_page()
+	context = None
 	try:
+		context = await browser.new_context(
+			user_agent=DEFAULT_USER_AGENT,
+			viewport={'width': 1440, 'height': 1000},
+		)
+		page = await context.new_page()
 		await page.goto(
 			f'{AGENTROUTER_BASE_URL}/login', wait_until='domcontentloaded', timeout=AGENTROUTER_LOGIN_TIMEOUT_MS
 		)
@@ -1041,7 +1048,11 @@ async def check_in_agentrouter_account(
 			error=f'处理异常: {str(e)[:100]}',
 		)
 	finally:
-		await context.close()
+		if context is not None:
+			try:
+				await context.close()
+			except Exception as e:
+				print(f'[警告] {account_name}: 关闭浏览器上下文失败 - {str(e)[:80]}')
 
 
 def make_anyrouter_failure(account: AccountConfig, account_index: int, error: str) -> CheckinResult:
@@ -1073,7 +1084,12 @@ async def run_anyrouter_checkins(accounts: list[AccountConfig]) -> list[CheckinR
 			results_by_index[index] = make_anyrouter_failure(accounts[index], index, result[1] or '预检失败')
 
 	if valid_indices:
-		waf_cookies_list = await get_all_waf_cookies(len(valid_indices))
+		try:
+			waf_cookies_list = await get_all_waf_cookies(len(valid_indices))
+		except Exception as e:
+			# 浏览器无法启动时不能让异常逃逸，否则整轮签到中断且不发失败通知。
+			print(f'[失败] AnyRouter: WAF cookies 获取阶段异常 - {str(e)[:100]}')
+			waf_cookies_list = [None] * len(valid_indices)
 		signin_results = await asyncio.gather(
 			*(
 				check_in_account(accounts[account_index], account_index, waf_cookies_list[valid_index])
@@ -1093,23 +1109,53 @@ async def run_anyrouter_checkins(accounts: list[AccountConfig]) -> list[CheckinR
 	return [results_by_index[index] for index in range(len(accounts))]
 
 
+def make_agentrouter_failure(account: AgentRouterAccountConfig, account_index: int, error: str) -> CheckinResult:
+	return make_result(
+		success=False,
+		account_index=account_index,
+		provider='AgentRouter',
+		account_name=get_agentrouter_account_name(account, account_index),
+		error=error,
+	)
+
+
 async def run_agentrouter_checkins(accounts: list[AgentRouterAccountConfig]) -> list[CheckinResult]:
 	"""在一个浏览器中使用独立 Context 并发处理 AgentRouter 多账号。"""
 	if not accounts:
 		return []
 	print(f'[系统] AgentRouter: 发现 {len(accounts)} 个账号')
-	async with async_playwright() as playwright:
-		browser = await playwright.chromium.launch(
-			headless=True,
-			args=['--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--no-sandbox'],
-		)
-		try:
-			results = await asyncio.gather(
-				*(check_in_agentrouter_account(browser, account, index) for index, account in enumerate(accounts))
+	try:
+		async with async_playwright() as playwright:
+			browser = await playwright.chromium.launch(
+				headless=True,
+				args=['--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--no-sandbox'],
 			)
-			return list(results)
-		finally:
-			await browser.close()
+			try:
+				raw_results = await asyncio.gather(
+					*(check_in_agentrouter_account(browser, account, index) for index, account in enumerate(accounts)),
+					return_exceptions=True,
+				)
+			finally:
+				try:
+					await browser.close()
+				except Exception as e:
+					print(f'[警告] AgentRouter: 关闭浏览器失败 - {str(e)[:80]}')
+	except Exception as e:
+		# 浏览器无法启动时，逐账号记为失败，避免打掉 AnyRouter 已收集的结果与失败通知。
+		print(f'[失败] AgentRouter: 浏览器启动失败 - {str(e)[:100]}')
+		return [
+			make_agentrouter_failure(account, index, f'浏览器启动失败: {str(e)[:80]}')
+			for index, account in enumerate(accounts)
+		]
+
+	results: list[CheckinResult] = []
+	for index, raw_result in enumerate(raw_results):
+		if isinstance(raw_result, BaseException):
+			print(f'[失败] AgentRouter 账号 {index + 1}: 处理异常 - {str(raw_result)[:100]}')
+			results.append(make_agentrouter_failure(accounts[index], index, f'处理异常: {str(raw_result)[:100]}'))
+		else:
+			results.append(raw_result)
+	return results
 
 
 def count_results(results: list[CheckinResult | BaseException]) -> tuple[int, int]:
@@ -1149,7 +1195,7 @@ async def main():
 	if notify.should_send_checkin(success_count, skipped_count, total_count):
 		notify.push_message('Router 自动签到结果', html_content, msg_type='html', text_content=notify_content)
 	else:
-		print('[通知] NOTIFY_ON_SUCCESS=false 且无失败账号，跳过通知发送')
+		print('[通知] 无失败账号，且 NOTIFY_ON_SUCCESS / NOTIFY_ON_SKIPPED 均未开启，跳过通知发送')
 
 	print(f'[汇总] 成功 {success_count}，已签 {skipped_count}，失败 {fail_count}')
 	sys.exit(0 if success_count + skipped_count > 0 else 1)

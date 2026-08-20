@@ -15,7 +15,7 @@
 - ✅ 绕过 Cloudflare WAF 限制
 - ✅ 智能重试机制（3 次，指数退避）
 - ✅ 紫蓝工作台风格 HTML 邮件通知，展示平台、账号与统计结果
-- ✅ 失败始终通知，成功通知可通过 GitHub Variable 控制
+- ✅ 失败始终通知，成功与「今日已签」各由独立 GitHub Variable 控制
 - ✅ 北京时区支持
 
 ## 技术栈
@@ -54,12 +54,12 @@
 
 #### AgentRouter
 
-AgentRouter 直接配置登录邮箱和密码，不需要手动提取 Cookie：
+AgentRouter（https://agentrouter.org/）直接配置登录邮箱和密码，不需要手动提取 Cookie：
 
 1. **Email**: AgentRouter 登录邮箱
 2. **Password**: AgentRouter 登录密码
 
-脚本使用 Playwright 操作真实登录表单。AgentRouter 当前存在重复登录仍提示“签到成功、额度到账”的站点问题，因此脚本不会信任页面 toast 或登录响应的 `checked_in` 字段，而是登录后查询 `type=4` 的系统日志，仅当本次登录产生“每日签到成功，增加额度”记录时才计为成功；当天已有更早记录时计为“今日已签”。
+脚本使用 Playwright 操作真实登录表单，每个账号使用独立浏览器上下文，互不干扰。AgentRouter 当前存在重复登录仍提示“签到成功、额度到账”的站点问题，因此脚本不会信任页面 toast 或登录响应的 `checked_in` 字段，而是登录后查询 `type=4` 的系统日志，仅当本次登录产生“每日签到成功，增加额度”记录时才计为成功；当天已有更早记录时计为“今日已签”；当天完全没有到账记录时计为失败，避免误报。
 
 ### 3. 设置 GitHub Environment Secret
 
@@ -70,46 +70,80 @@ AgentRouter 直接配置登录邮箱和密码，不需要手动提取 Cookie：
 5. 点击 "Add environment secret"，按需创建：
    - `ANYROUTER_ACCOUNTS`: AnyRouter 多账号 JSON
    - `AGENTROUTER_ACCOUNTS`: AgentRouter 多账号 JSON
-6. 在 Environment variables 中添加 `NOTIFY_ON_SUCCESS`：
-   - `false`（默认）：仅有失败账号时通知
-   - `true`：成功、今日已签或失败都通知
+6. 在 Environment variables 中添加通知开关（都是可选，默认 `false`）：
+   - `NOTIFY_ON_SUCCESS`: `true` 时推送签到成功
+   - `NOTIFY_ON_SKIPPED`: `true` 时推送今日已签
+   - 失败始终推送，与这两个开关无关
 
 ### 4. 多账号配置格式
 
-两个 Secret 都是可选的，但至少需要配置一个。两个同时存在时会在同一次任务中依次执行并合并通知。
+两个 Secret 都是可选的，但至少需要配置一个。两个同时存在时会在同一次任务中依次执行并合并通知。两者都必须是 JSON **数组**，数组里放几个对象就是几个账号。
 
-#### `ANYROUTER_ACCOUNTS`
+下面每个平台先给最小必填形态，可选字段单独列在后面。
+
+#### `ANYROUTER_ACCOUNTS`（Cookie + api_user）
+
+| 字段 | 必填 | 类型 | 说明 |
+| ---- | ---- | ---- | ---- |
+| `cookies` | 是 | object 或 string | 至少包含 `session`；也可直接填 `"a=1; b=2"` 形式的 Cookie 字符串 |
+| `api_user` | 是 | string | 请求头 `New-Api-User` 的值，正常是 5 位数字 |
+| `name` | 否 | string | 通知中显示的账号名称，省略时依次显示 `账号 1`、`账号 2` |
 
 ```json
 [
   {
-    "name": "AnyRouter 主账号",
     "cookies": {
       "session": "account1_session_value"
     },
     "api_user": "account1_api_user_id"
+  },
+  {
+    "cookies": {
+      "session": "account2_session_value"
+    },
+    "api_user": "account2_api_user_id"
   }
 ]
 ```
 
-#### `AGENTROUTER_ACCOUNTS`
+#### `AGENTROUTER_ACCOUNTS`（邮箱 + 密码）
+
+| 字段 | 必填 | 类型 | 说明 |
+| ---- | ---- | ---- | ---- |
+| `email` | 是 | string | AgentRouter 登录邮箱 |
+| `password` | 是 | string | AgentRouter 登录密码 |
+| `name` | 否 | string | 通知中显示的账号名称，省略时显示脱敏邮箱，如 `us***@example.com` |
 
 ```json
 [
   {
-    "name": "AgentRouter 主账号",
     "email": "user@example.com",
     "password": "your_password"
   },
   {
-    "name": "AgentRouter 备用账号",
     "email": "another@example.com",
     "password": "another_password"
   }
 ]
 ```
 
-接下来获取 cookies 与 api_user 的值。
+#### 可选：自定义账号名称
+
+两个平台都不需要 `name`，省略时会自动生成显示名。只有当你想让通知里显示自定义名称时才加上它：
+
+```json
+[
+  {
+    "name": "主力号",
+    "email": "user@example.com",
+    "password": "your_password"
+  }
+]
+```
+
+以上 JSON 在 GitHub Secret 中可以换行排版；本地 `.env` 文件有额外限制，见[环境变量配置](#环境变量配置)。
+
+接下来获取 AnyRouter 的 cookies 与 api_user 的值。
 
 通过 F12 工具，切到 Application 面板，拿到 session 的值，最好重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
 
@@ -150,44 +184,22 @@ AgentRouter 直接配置登录邮箱和密码，不需要手动提取 Cookie：
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
 
-## 配置示例
-
-下面是两个平台同时启用时的 Secret 结构；它们需要分别保存，不能合并成同一个 JSON。
-
-`ANYROUTER_ACCOUNTS`：
-
-```json
-[
-  {
-    "name": "AnyRouter 主账号",
-    "cookies": {
-      "session": "abc123session"
-    },
-    "api_user": "user123"
-  }
-]
-```
-
-`AGENTROUTER_ACCOUNTS`：
-
-```json
-[
-  {
-    "name": "AgentRouter 主账号",
-    "email": "user@example.com",
-    "password": "your_password"
-  }
-]
-```
-
 ## 开启通知
 
-脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
+脚本支持多种通知方式，可以通过配置以下环境变量开启。如果 `webhook` 有安全设置要求，例如钉钉的自定义关键词，请填写 `Router`——推送标题固定为 `Router 自动签到结果`，填 `AnyRouter` 会被拦截。
 
 说明：
 
-- `NOTIFY_ON_SUCCESS=false` 时，成功和“今日已签”不会推送；任何失败仍会强制推送。
-- `NOTIFY_ON_SUCCESS=true` 时，每次定时任务都会按实际结果推送。
+- 失败**始终**推送，不受任何开关影响。
+- `NOTIFY_ON_SUCCESS` 与 `NOTIFY_ON_SKIPPED` 是两个独立开关，都在 GitHub Variables 里改，无需修改代码：
+
+| `NOTIFY_ON_SUCCESS` | `NOTIFY_ON_SKIPPED` | 效果 |
+| ------------------- | ------------------- | ---- |
+| `false` | `false` | 默认，只有失败才推送 |
+| `true` | `false` | 有成功签到时推送；全部「今日已签」时不推 |
+| `false` | `true` | 「今日已签」时推送；纯成功时不推 |
+| `true` | `true` | 每次执行都推送 |
+
 - 已移除 `PushPlus`。根据其官方文档，自 2024-08-01 起发送消息需完成实名认证，且实名认证会产生服务费，或通过付费会员完成，不再适合作为本项目默认低门槛通道。
 - `息知` 仅支持文本消息。
 - `Server 酱` 仍保留免费会员方案，但免费额度较低；若你推送频率不高，可以继续使用。
@@ -270,29 +282,20 @@ uv run checkin.py
 
 ### 环境变量配置
 
-创建 `.env` 文件（参考 `.env.example`）：
+创建 `.env` 文件（参考 `.env.example`）。
+
+> ⚠️ **`.env` 里的 JSON 必须写成一行。** `python-dotenv` 不支持裸值跨行，多行 JSON 会被解析成错误的键值对导致启动失败。若确实需要换行，必须用单引号把整段 JSON 包起来。
 
 ```bash
-# AnyRouter（可选）
-ANYROUTER_ACCOUNTS=[
-  {
-	"name": "AnyRouter 主账号",
-    "cookies": {"session": "your_session_value"},
-    "api_user": "your_api_user_id"
-  }
-]
+# AnyRouter（可选，单行 JSON）
+ANYROUTER_ACCOUNTS=[{"cookies":{"session":"your_session_value"},"api_user":"your_api_user_id"}]
 
-# AgentRouter（可选）
-AGENTROUTER_ACCOUNTS=[
-  {
-	"name": "AgentRouter 主账号",
-	"email": "user@example.com",
-	"password": "your_password"
-  }
-]
+# AgentRouter（可选，单行 JSON）
+AGENTROUTER_ACCOUNTS=[{"email":"user@example.com","password":"your_password"}]
 
-# false：仅失败通知；true：所有结果通知
+# 通知开关：失败始终通知，下面两项各自独立
 NOTIFY_ON_SUCCESS=false
+NOTIFY_ON_SKIPPED=false
 
 # 通知配置（可选）
 EMAIL_USER=your_email@example.com
@@ -300,6 +303,15 @@ EMAIL_PASS=your_password_or_app_token
 EMAIL_TO=recipient@example.com
 XIZHI_KEY=your_xizhi_key
 SERVERPUSHKEY=your_server_pushkey
+```
+
+多账号时在同一行的数组里继续追加对象即可。如果偏好换行排版，用单引号包裹：
+
+```bash
+AGENTROUTER_ACCOUNTS='[
+  {"email": "user@example.com", "password": "your_password"},
+  {"email": "another@example.com", "password": "another_password"}
+]'
 ```
 
 ## 测试
@@ -320,12 +332,17 @@ uv run pytest tests/ --cov=. --cov-report=term-missing
 
 ## 更新日志
 
-### 双平台版本
+### v2.0.0 (2026-08-21)
 
-- 新增 AgentRouter 邮箱 + 密码多账号签到
-- AgentRouter 使用 `type=4` 系统日志核验实际签到到账，规避重复登录误报
-- AnyRouter 与 AgentRouter 共用 GitHub Actions、通知统计与新版 HTML UI
-- 新增 `NOTIFY_ON_SUCCESS` GitHub Variable，无需修改代码即可切换成功通知
+- ✨ 新增 AgentRouter 邮箱 + 密码多账号签到，与 AnyRouter 可单独或同时启用
+- ✨ AgentRouter 使用 `type=4` 系统日志核验实际到账，规避站点重复提示导致的误报
+- ✨ AnyRouter 与 AgentRouter 共用 GitHub Actions、通知统计与新版 HTML 邮件 UI
+- ✨ 新增 `NOTIFY_ON_SUCCESS` 与 `NOTIFY_ON_SKIPPED` 两个独立 GitHub Variable，成功与「今日已签」推送均无需改代码
+- 🐛 修复 AgentRouter 单账号异常会打掉整轮签到并导致完全不发通知的问题
+- 🐛 修复 `name` 写成非字符串时抛 `AttributeError`，以及日志把自定义名称当邮箱打印的问题
+- 🔧 依赖升级并锁定（playwright 1.62.0、httpx 0.28.1、python-dotenv 1.2.3、ruff 0.16.3 等），修复 `h2`/`idna`/`python-dotenv` 已知漏洞
+- 🔧 Actions 固定到 commit SHA，生产任务改用 `uv sync --locked --no-dev`
+- 📝 补全双平台配置字段说明，修正 `.env` 单行 JSON 要求与钉钉关键词
 
 ### v1.1.0 (2025-01-11)
 

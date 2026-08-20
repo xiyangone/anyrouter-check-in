@@ -178,6 +178,35 @@ def test_checkin_notification_policy_can_enable_success(monkeypatch):
 	assert kit.should_send_checkin(success_count=1, skipped_count=1, total_count=2) is True
 
 
+def test_notify_on_success_does_not_push_pure_skipped(monkeypatch):
+	"""NOTIFY_ON_SUCCESS 只管成功；全部今日已签时不应被它带出推送。"""
+	monkeypatch.setenv('NOTIFY_ON_SUCCESS', 'true')
+	monkeypatch.setenv('NOTIFY_ON_SKIPPED', 'false')
+	kit = NotificationKit()
+
+	assert kit.should_send_checkin(success_count=0, skipped_count=2, total_count=2) is False
+
+
+def test_notify_on_skipped_pushes_only_skipped(monkeypatch):
+	"""NOTIFY_ON_SKIPPED 独立开关：只推今日已签，不因此推纯成功。"""
+	monkeypatch.setenv('NOTIFY_ON_SUCCESS', 'false')
+	monkeypatch.setenv('NOTIFY_ON_SKIPPED', 'true')
+	kit = NotificationKit()
+
+	assert kit.should_send_checkin(success_count=0, skipped_count=2, total_count=2) is True
+	assert kit.should_send_checkin(success_count=2, skipped_count=0, total_count=2) is False
+	# 失败始终通知，与两个开关无关
+	assert kit.should_send_checkin(success_count=0, skipped_count=0, total_count=1) is True
+
+
+def test_notify_switches_accept_github_variable_strings(monkeypatch):
+	"""GitHub Variable 传入的是字符串，需正确解析 true/false 两种取值。"""
+	for raw, expected in (('true', True), ('True', True), ('false', False), ('', False)):
+		monkeypatch.setenv('NOTIFY_ON_SKIPPED', raw)
+		kit = NotificationKit()
+		assert kit.should_send_checkin(success_count=0, skipped_count=1, total_count=1) is expected, raw
+
+
 @patch('notify.NotificationKit.send_email')
 @patch('notify.NotificationKit.send_dingtalk')
 @patch('notify.NotificationKit.send_wecom')

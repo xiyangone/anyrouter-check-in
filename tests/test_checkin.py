@@ -1,14 +1,23 @@
 import asyncio
+import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
+
+from dotenv import dotenv_values
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 import checkin
+
+REQUIRED_ACCOUNT_FIELDS = {
+	'ANYROUTER_ACCOUNTS': ('cookies', 'api_user'),
+	'AGENTROUTER_ACCOUNTS': ('email', 'password'),
+}
 
 
 def run_async(coro):
@@ -304,3 +313,178 @@ def test_build_plain_text_notification_highlights_status_stats_and_details():
 			'   余额：$2992.75｜已用：$207.25',
 		]
 	)
+
+
+def assert_dotenv_accounts_are_loadable(env_path: Path) -> set[str]:
+	"""断言一个 .env 片段能被 dotenv 解析，且账号 JSON 可被 checkin 正常读取。"""
+	values = dotenv_values(env_path)
+	found: set[str] = set()
+	for key, required_fields in REQUIRED_ACCOUNT_FIELDS.items():
+		raw = values.get(key)
+		if raw is None:
+			continue
+		found.add(key)
+		accounts = json.loads(raw)
+		assert isinstance(accounts, list) and accounts, f'{key} 必须是非空 JSON 数组'
+		for account in accounts:
+			missing = [field for field in required_fields if not account.get(field)]
+			assert not missing, f'{key} 缺少必需字段: {missing}'
+
+	unexpected = {key for key in values if key not in REQUIRED_ACCOUNT_FIELDS and not key.isidentifier()}
+	assert not unexpected, f'dotenv 解析出非法键名，说明存在跨行裸值: {sorted(unexpected)}'
+	return found
+
+
+def test_env_example_accounts_are_parsable():
+	found = assert_dotenv_accounts_are_loadable(project_root / '.env.example')
+	assert found == set(REQUIRED_ACCOUNT_FIELDS)
+
+
+def test_readme_env_snippets_are_parsable(tmp_path: Path):
+	readme = (project_root / 'README.md').read_text(encoding='utf-8')
+	blocks = [block for block in re.findall(r'```bash\n(.*?)```', readme, re.DOTALL) if '_ACCOUNTS=' in block]
+	assert blocks, 'README 中缺少 .env 账号配置示例'
+
+	for index, block in enumerate(blocks):
+		env_path = tmp_path / f'readme_{index}.env'
+		env_path.write_text(block, encoding='utf-8')
+		assert assert_dotenv_accounts_are_loadable(env_path), f'README 第 {index + 1} 段示例未解析出账号配置'
+
+
+class ExplodingBrowser:
+	"""第 1 个账号建 context 即失败，第 2 个正常返回可用 context。"""
+
+	def __init__(self):
+		self.contexts_created = 0
+		self.closed = False
+
+	async def new_context(self, **kwargs):
+		self.contexts_created += 1
+		if self.contexts_created == 1:
+			raise RuntimeError('Target page, context or browser has been closed')
+		return ExplodingContext()
+
+	async def close(self):
+		self.closed = True
+
+
+class ExplodingContext:
+	def __init__(self):
+		self.closed = False
+
+	async def new_page(self):
+		return ExplodingPage()
+
+	async def close(self):
+		self.closed = True
+
+
+class ExplodingPage:
+	async def goto(self, *args, **kwargs):
+		raise RuntimeError('net::ERR_ABORTED')
+
+
+def test_agentrouter_account_failure_is_isolated_per_account():
+	"""单个 AgentRouter 账号的浏览器异常不得让整批抛出。"""
+	browser: Any = ExplodingBrowser()
+	accounts: list[Any] = [
+		{'email': 'first@example.com', 'password': 'p1'},
+		{'email': 'second@example.com', 'password': 'p2'},
+	]
+
+	async def gather_all():
+		return await asyncio.gather(
+			*(checkin.check_in_agentrouter_account(browser, account, index) for index, account in enumerate(accounts))
+		)
+
+	results: list[Any] = run_async(gather_all())
+
+	assert len(results) == 2
+	assert all(result['success'] is False for result in results)
+	assert all(result['provider'] == 'AgentRouter' for result in results)
+	assert '处理异常' in (results[0]['error'] or '')
+
+
+def test_run_agentrouter_checkins_survives_browser_launch_failure(monkeypatch):
+	"""浏览器启动失败时须逐账号记为失败，而不是让异常打掉整轮签到与通知。"""
+
+	class FailingPlaywright:
+		async def __aenter__(self):
+			raise RuntimeError('Executable does not exist')
+
+		async def __aexit__(self, exc_type, exc, tb):
+			return False
+
+	monkeypatch.setattr(checkin, 'async_playwright', lambda: FailingPlaywright())
+	accounts: list[Any] = [
+		{'email': 'a@example.com', 'password': 'p'},
+		{'name': '自定义号', 'email': 'b@example.com', 'password': 'p'},
+	]
+
+	results: list[Any] = run_async(checkin.run_agentrouter_checkins(accounts))
+
+	assert len(results) == 2
+	assert all(result['success'] is False for result in results)
+	assert all('浏览器启动失败' in (result['error'] or '') for result in results)
+	assert results[0]['account_name'] == 'a***@example.com'
+	assert results[1]['account_name'] == '自定义号'
+
+
+def test_run_agentrouter_checkins_survives_unexpected_account_exception(monkeypatch):
+	"""即使账号级处理函数意外抛出，批次也必须逐账号降级而不是整批抛出。"""
+
+	class WorkingPlaywright:
+		async def __aenter__(self):
+			return self
+
+		async def __aexit__(self, exc_type, exc, tb):
+			return False
+
+		@property
+		def chromium(self):
+			return self
+
+		async def launch(self, **kwargs):
+			return ExplodingBrowser()
+
+	async def exploding_checkin(browser, account, index):
+		if index == 0:
+			raise RuntimeError('unexpected internal failure')
+		return checkin.make_result(
+			success=True,
+			account_index=index,
+			provider='AgentRouter',
+			account_name=checkin.get_agentrouter_account_name(account, index),
+		)
+
+	monkeypatch.setattr(checkin, 'async_playwright', lambda: WorkingPlaywright())
+	monkeypatch.setattr(checkin, 'check_in_agentrouter_account', exploding_checkin)
+
+	accounts: list[Any] = [
+		{'email': 'boom@example.com', 'password': 'p'},
+		{'email': 'fine@example.com', 'password': 'p'},
+	]
+
+	results: list[Any] = run_async(checkin.run_agentrouter_checkins(accounts))
+
+	assert len(results) == 2
+	assert results[0]['success'] is False
+	assert '处理异常' in (results[0]['error'] or '')
+	assert results[0]['account_name'] == 'bo***@example.com'
+	assert results[1]['success'] is True
+
+
+def test_agentrouter_account_name_tolerates_non_string_name():
+	"""name 写成非字符串时不得抛异常，回退到脱敏邮箱。"""
+	get_name = checkin.get_agentrouter_account_name
+	assert get_name(cast(Any, {'name': 123, 'email': 'user@example.com'}), 0) == 'us***@example.com'
+	assert get_name(cast(Any, {'name': None, 'email': 'ab@example.com'}), 0) == 'a***@example.com'
+	assert get_name(cast(Any, {'name': '  ', 'email': 'bad-email'}), 3) == '账号 4'
+	assert get_name(cast(Any, {'name': '  主力号  ', 'email': 'x@y.z'}), 0) == '主力号'
+
+
+def test_mask_email_never_leaks_full_address():
+	assert checkin.mask_email('someone@example.com') == 'so***@example.com'
+	assert checkin.mask_email('ab@example.com') == 'a***@example.com'
+	assert checkin.mask_email('no-at-sign') == ''
+	assert checkin.mask_email(None) == ''

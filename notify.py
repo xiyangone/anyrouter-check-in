@@ -37,11 +37,15 @@ class NotificationKit:
 		return value.strip().lower() in {'1', 'true', 'yes', 'on', 'y'}
 
 	def should_send_checkin(self, success_count: int, skipped_count: int, total_count: int) -> bool:
-		"""失败始终通知；成功/今日已签由 NOTIFY_ON_SUCCESS 控制。"""
+		"""失败始终通知；成功与今日已签各自由独立开关控制。"""
 		fail_count = max(total_count - success_count - skipped_count, 0)
 		if fail_count > 0:
 			return True
-		return self._env_flag('NOTIFY_ON_SUCCESS', default=False)
+		if success_count > 0 and self._env_flag('NOTIFY_ON_SUCCESS', default=False):
+			return True
+		if skipped_count > 0 and self._env_flag('NOTIFY_ON_SKIPPED', default=False):
+			return True
+		return False
 
 	@staticmethod
 	def _html_to_text(content: str) -> str:
