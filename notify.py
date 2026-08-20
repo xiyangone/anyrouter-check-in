@@ -16,6 +16,7 @@ class NotificationKit:
 	"""多平台通知工具类"""
 
 	def __init__(self) -> None:
+		self.last_email_sent = False
 		self.reload_from_env()
 
 	def reload_from_env(self) -> None:
@@ -28,6 +29,10 @@ class NotificationKit:
 		self.dingding_webhook: str | None = os.getenv('DINGDING_WEBHOOK')
 		self.feishu_webhook: str | None = os.getenv('FEISHU_WEBHOOK')
 		self.weixin_webhook: str | None = os.getenv('WEIXIN_WEBHOOK')
+
+	def email_is_configured(self) -> bool:
+		"""邮箱三项配置是否齐全。"""
+		return bool(self.email_user and self.email_pass and self.email_to)
 
 	@staticmethod
 	def _env_flag(name: str, default: bool = False) -> bool:
@@ -192,6 +197,7 @@ class NotificationKit:
 	) -> int:
 		"""推送消息到所有已配置的通知渠道"""
 		self.reload_from_env()
+		self.last_email_sent = False
 		html_content = content if msg_type == 'html' else content.replace('\n', '<br>')
 		plain_text_content = (
 			text_content.strip()
@@ -221,6 +227,8 @@ class NotificationKit:
 		for name, func in notifications:
 			try:
 				used_format = func()
+				if name == 'Email':
+					self.last_email_sent = True
 				print(f'[{name}]: 消息推送成功 (格式: {used_format})')
 				success_count += 1
 			except ValueError as e:

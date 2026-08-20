@@ -1412,13 +1412,15 @@ async def main():
 		html_content = build_html_notification(
 			notification_results, notify_success, notify_skipped, notify_waiting, notify_total
 		)
+		email_configured = notify.email_is_configured()
 		sent_count = notify.push_message(
 			build_notification_title(notification_results),
 			html_content,
 			msg_type='html',
 			text_content=notify_content,
 		)
-		if sent_count > 0 and new_successes:
+		delivery_confirmed = notify.last_email_sent if email_configured else sent_count > 0
+		if delivery_confirmed and new_successes:
 			state['notified_successes'] = sorted(set(state['notified_successes']) | set(new_successes))
 	else:
 		print('[通知] NOTIFY_ONCE=true，且本轮没有新的成功或失败，跳过重复通知')

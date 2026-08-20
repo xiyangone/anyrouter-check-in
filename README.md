@@ -12,7 +12,7 @@
 - ✅ 两个平台均支持单个或多个账号
 - ✅ **WAF Cookies 缓存机制**（2 小时有效期，减少浏览器启动开销）
 - ✅ 多种机器人通知（可选）
-- ✅ 绕过 Cloudflare WAF 限制
+- ✅ GitHub Actions 使用临时 WARP 出口规避 AgentRouter 对机房 IP 的 WAF 拦截
 - ✅ 智能重试机制（3 次，指数退避）
 - ✅ 紫蓝玻璃态工作台风格 HTML 邮件通知，展示平台、账号与统计结果
 - ✅ 单一 `NOTIFY_ONCE` 开关控制通知去重，默认每轮推送，开启后成功结果每天只推送一次
@@ -186,7 +186,7 @@ AgentRouter（`https://agentrouter.org/`）直接配置登录邮箱和密码，�
 
 ## 开启通知
 
-脚本支持多种通知方式，可以通过配置以下环境变量开启。如果 `webhook` 有安全设置要求，例如钉钉的自定义关键词，请填写 `Router`——推送标题固定为 `Router 自动签到结果`，填 `AnyRouter` 会被拦截。
+脚本支持多种通知方式，可以通过配置以下环境变量开启。如果 `webhook` 有安全设置要求，例如钉钉的自定义关键词，请填写 `Router`。推送标题会按本轮结果显示为 `AgentRouter 签到成功`、`AnyRouter 签到成功`、`Router 多平台签到成功` 或异常/状态标题。
 
 说明：
 
@@ -341,6 +341,7 @@ uv run pytest tests/ --cov=. --cov-report=term-missing
 - 🐛 修复 `name` 写成非字符串时抛 `AttributeError`，以及日志把自定义名称当邮箱打印的问题
 - 🔧 依赖升级并锁定（playwright 1.62.0、httpx 0.28.1、python-dotenv 1.2.3、ruff 0.16.3 等），修复 `h2`/`idna`/`python-dotenv` 已知漏洞
 - 🔧 Actions 固定到 commit SHA，生产任务改用 `uv sync --locked --no-dev`
+- 🔧 GitHub Actions 切换到 Ubuntu，并使用临时 WARP 出口规避 AgentRouter WAF；任务结束后自动销毁
 - 📝 补全双平台配置字段说明，修正 `.env` 单行 JSON 要求与钉钉关键词
 
 ### v1.1.0 (2025-01-11)
