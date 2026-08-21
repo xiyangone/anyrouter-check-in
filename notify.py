@@ -12,6 +12,38 @@ import httpx
 NOTIFY_TIMEOUT = 30.0
 
 
+def _response_payload(response: httpx.Response) -> dict[str, object] | str | None:
+	"""读取通知接口响应；无法解析时保留纯文本内容。"""
+	try:
+		payload = response.json()
+	except ValueError:
+		return response.text.strip()
+	return payload if isinstance(payload, dict) else None
+
+
+def _require_business_success(response: httpx.Response, provider: str) -> None:
+	"""HTTP 成功不代表业务成功，按各渠道业务码确认投递结果。"""
+	response.raise_for_status()
+	payload = _response_payload(response)
+	if provider == 'DingTalk' or provider == 'WeCom':
+		if not isinstance(payload, dict) or payload.get('errcode') != 0:
+			raise RuntimeError(f'{provider} 业务响应失败: {str(payload)[:120]}')
+	elif provider == 'Feishu':
+		if not isinstance(payload, dict) or payload.get('code', payload.get('StatusCode')) != 0:
+			raise RuntimeError(f'{provider} 业务响应失败: {str(payload)[:120]}')
+	elif provider == 'ServerPush':
+		if not isinstance(payload, dict) or payload.get('code') != 0:
+			raise RuntimeError(f'{provider} 业务响应失败: {str(payload)[:120]}')
+	elif provider == 'Xizhi':
+		if isinstance(payload, dict):
+			if payload.get('code') not in (0, 200):
+				raise RuntimeError(f'{provider} 业务响应失败: {str(payload)[:120]}')
+		elif isinstance(payload, str) and payload.lower() != 'success':
+			raise RuntimeError(f'{provider} 业务响应失败: {payload[:120]}')
+		elif payload is None:
+			raise RuntimeError(f'{provider} 业务响应失败: 空响应')
+
+
 class NotificationKit:
 	"""多平台通知工具类"""
 
@@ -120,7 +152,7 @@ class NotificationKit:
 		data = {'title': title, 'content': content}
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
 			response = client.post(f'https://xizhi.qqoq.net/{self.xizhi_key}.send', json=data)
-			response.raise_for_status()
+			_require_business_success(response, 'Xizhi')
 		return 'text'
 
 	def send_serverPush(self, title: str, content: str) -> str:
@@ -131,7 +163,7 @@ class NotificationKit:
 		data = {'title': title, 'desp': content}
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
 			response = client.post(f'https://sctapi.ftqq.com/{self.server_push_key}.send', json=data)
-			response.raise_for_status()
+			_require_business_success(response, 'ServerPush')
 		return 'markdown'
 
 	def send_dingtalk(self, title: str, content: str, msg_format: Literal['text', 'markdown'] = 'text') -> str:
@@ -149,7 +181,7 @@ class NotificationKit:
 
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
 			response = client.post(self.dingding_webhook, json=data)
-			response.raise_for_status()
+			_require_business_success(response, 'DingTalk')
 		return msg_format
 
 	def send_feishu(self, title: str, content: str, msg_format: Literal['text', 'markdown'] = 'markdown') -> str:
@@ -170,7 +202,7 @@ class NotificationKit:
 
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
 			response = client.post(self.feishu_webhook, json=data)
-			response.raise_for_status()
+			_require_business_success(response, 'Feishu')
 		return msg_format
 
 	def send_wecom(self, title: str, content: str, msg_format: Literal['text', 'markdown'] = 'text') -> str:
@@ -185,7 +217,7 @@ class NotificationKit:
 
 		with httpx.Client(timeout=NOTIFY_TIMEOUT) as client:
 			response = client.post(self.weixin_webhook, json=data)
-			response.raise_for_status()
+			_require_business_success(response, 'WeCom')
 		return msg_format
 
 	def push_message(

@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from dotenv import load_dotenv
 
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from notify import NotificationKit
+from notify import NotificationKit, _require_business_success
 
 # 注意：不在模块级别加载 .env，避免影响测试
 
@@ -68,6 +69,7 @@ def test_send_xizhi(mock_client_class):
 	content = 'test-content'
 	mock_response = MagicMock()
 	mock_response.raise_for_status = MagicMock()
+	mock_response.json.return_value = {'code': 200, 'msg': 'success'}
 	mock_client = MagicMock()
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
@@ -90,6 +92,7 @@ def test_send_serverPush(mock_client_class):
 	notification_kit = NotificationKit()
 	mock_response = MagicMock()
 	mock_response.raise_for_status = MagicMock()
+	mock_response.json.return_value = {'code': 0}
 	mock_client = MagicMock()
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
@@ -106,6 +109,7 @@ def test_send_dingtalk(mock_client_class):
 	notification_kit = NotificationKit()
 	mock_response = MagicMock()
 	mock_response.raise_for_status = MagicMock()
+	mock_response.json.return_value = {'errcode': 0, 'errmsg': 'ok'}
 	mock_client = MagicMock()
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
@@ -124,6 +128,7 @@ def test_send_feishu(mock_client_class):
 	notification_kit = NotificationKit()
 	mock_response = MagicMock()
 	mock_response.raise_for_status = MagicMock()
+	mock_response.json.return_value = {'code': 0, 'msg': 'success'}
 	mock_client = MagicMock()
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
@@ -142,6 +147,7 @@ def test_send_wecom(mock_client_class):
 	notification_kit = NotificationKit()
 	mock_response = MagicMock()
 	mock_response.raise_for_status = MagicMock()
+	mock_response.json.return_value = {'errcode': 0, 'errmsg': 'ok'}
 	mock_client = MagicMock()
 	mock_client.post.return_value = mock_response
 	mock_client_class.return_value.__enter__.return_value = mock_client
@@ -151,6 +157,23 @@ def test_send_wecom(mock_client_class):
 	mock_client.post.assert_called_once()
 	args = mock_client.post.call_args[1]
 	assert args['json']['msgtype'] == 'text'
+
+
+@pytest.mark.parametrize(
+	('provider', 'payload'),
+	[
+		('DingTalk', {'errcode': 310000, 'errmsg': 'keyword not matched'}),
+		('WeCom', {'errcode': 40058, 'errmsg': 'invalid parameter'}),
+		('Feishu', {'code': 9499, 'msg': 'Bad Request'}),
+		('ServerPush', {'code': 1, 'message': 'send failed'}),
+		('Xizhi', {'code': 500, 'msg': 'send failed'}),
+	],
+)
+def test_notification_channels_reject_business_errors(provider, payload):
+	response = httpx.Response(200, json=payload, request=httpx.Request('POST', 'https://notify.test'))
+
+	with pytest.raises(RuntimeError, match=f'{provider} 业务响应失败'):
+		_require_business_success(response, provider)
 
 
 def test_missing_config():

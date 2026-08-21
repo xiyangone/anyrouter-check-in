@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import httpx
+import pytest
 from dotenv import dotenv_values
 
 project_root = Path(__file__).parent.parent
@@ -110,6 +112,81 @@ def test_load_account_configs_allow_either_provider(monkeypatch):
 	]
 
 
+def test_load_account_configs_reject_non_string_credentials(monkeypatch):
+	monkeypatch.setenv('AGENTROUTER_ACCOUNTS', '[{"email":123,"password":"secret"}]')
+
+	assert checkin.load_agentrouter_accounts() is None
+
+	monkeypatch.setenv('AGENTROUTER_ACCOUNTS', '[{"name":123,"email":"user@example.com","password":"secret"}]')
+
+	assert checkin.load_agentrouter_accounts() is None
+
+	monkeypatch.setenv('AGENTROUTER_ACCOUNTS', '[{"name":null,"email":"user@example.com","password":"secret"}]')
+
+	assert checkin.load_agentrouter_accounts() is None
+
+
+def test_load_account_configs_accept_cookie_object_and_reject_invalid_values(monkeypatch):
+	monkeypatch.setenv('ANYROUTER_ACCOUNTS', '[{"cookies":{"session":"value"},"api_user":"12345"}]')
+	assert checkin.load_accounts() == [{'cookies': {'session': 'value'}, 'api_user': '12345'}]
+
+	monkeypatch.setenv('ANYROUTER_ACCOUNTS', '[{"cookies":{"session":123},"api_user":"12345"}]')
+	assert checkin.load_accounts() is None
+
+
+def test_build_headers_uses_supported_content_encodings():
+	assert checkin.build_headers('123')['Accept-Encoding'] == 'gzip, deflate'
+
+
+def test_parse_anyrouter_json_reports_waf_html_response():
+	response = httpx.Response(
+		200,
+		headers={'Content-Type': 'text/html; charset=utf-8', 'Content-Encoding': 'gzip'},
+		text='<html><script>WAF challenge</script></html>',
+		request=httpx.Request('GET', 'https://anyrouter.top/api/user/self'),
+	)
+
+	with pytest.raises(RuntimeError, match=r'/api/user/self 返回WAF/网关 HTML .*Content-Type text/html'):
+		checkin.parse_anyrouter_json(response, '/api/user/self')
+
+
+def test_save_notification_state_creates_parent_directory(tmp_path, monkeypatch):
+	state_path = tmp_path / 'nested' / 'state.json'
+	monkeypatch.setattr(checkin, 'NOTIFICATION_STATE_FILE', state_path)
+
+	checkin.save_notification_state({'date': '2026-08-21', 'notified_successes': ['key']})
+
+	assert state_path.exists()
+	assert json.loads(state_path.read_text(encoding='utf-8'))['notified_successes'] == ['key']
+
+
+def test_do_checkin_request_retries_retryable_status_and_honors_retry_after(monkeypatch):
+	class FakeClient:
+		def __init__(self):
+			self.calls = 0
+
+		async def post(self, url, headers, timeout):
+			self.calls += 1
+			request = httpx.Request('POST', url, headers=headers)
+			if self.calls == 1:
+				return httpx.Response(503, headers={'Retry-After': '4'}, request=request)
+			return httpx.Response(200, json={'success': True}, request=request)
+
+	delays: list[float] = []
+
+	async def record_sleep(delay):
+		delays.append(delay)
+
+	monkeypatch.setattr(checkin.asyncio, 'sleep', record_sleep)
+	client = FakeClient()
+	success, error = run_async(checkin.do_checkin_request(cast(Any, client), checkin.build_headers('12345'), '账号 1'))
+
+	assert success is True
+	assert error is None
+	assert client.calls == 2
+	assert delays == [4.0]
+
+
 def test_verify_agentrouter_checkin_log_requires_new_log_after_login():
 	class FakePage:
 		def __init__(self, items):
@@ -191,6 +268,51 @@ def test_agentrouter_login_uses_latest_local_or_server_timestamp():
 	assert checkin.get_agentrouter_login_reference_time(200, 'invalid') == 200
 
 
+def test_agentrouter_browser_fetch_sets_browser_timeout():
+	class FakePage:
+		def __init__(self):
+			self.script = ''
+			self.payload = {}
+
+		async def evaluate(self, script, payload):
+			self.script = script
+			self.payload = payload
+			return {
+				'status': 200,
+				'content_type': 'application/json',
+				'text': '{}',
+				'url': 'https://agentrouter.org/api/status',
+			}
+
+	page = FakePage()
+	response = run_async(checkin.agentrouter_browser_fetch(page, '/api/status'))
+
+	assert response['status'] == 200
+	assert page.payload['timeout_ms'] == checkin.AGENTROUTER_FETCH_TIMEOUT_MS
+	assert 'AbortController' in page.script
+	assert 'clearTimeout(timeoutId)' in page.script
+
+
+def test_agentrouter_browser_fetch_retries_python_timeout(monkeypatch):
+	class FakePage:
+		def __init__(self):
+			self.calls = 0
+
+		async def evaluate(self, _script, _payload):
+			self.calls += 1
+			await asyncio.get_running_loop().create_future()
+
+	page = FakePage()
+	monkeypatch.setattr(checkin, 'AGENTROUTER_FETCH_TIMEOUT_MS', 1)
+	monkeypatch.setattr(checkin, 'AGENTROUTER_FETCH_TIMEOUT_GRACE', 0.001)
+	monkeypatch.setattr(checkin, 'RETRY_BASE_DELAY', 0)
+
+	with pytest.raises(RuntimeError, match=r'AgentRouter 请求超时: /api/status'):
+		run_async(checkin.agentrouter_browser_fetch(page, '/api/status'))
+
+	assert page.calls == checkin.MAX_RETRIES
+
+
 def test_main_combines_both_providers_and_respects_notify_policy():
 	captured: dict[str, Any] = {}
 
@@ -224,19 +346,12 @@ def test_main_combines_both_providers_and_respects_notify_policy():
 			}
 		]
 
-	def fake_build_html_notification(results, success_count, skipped_count, waiting_count, total_count):
+	def fake_build_plain_text_notification(results, success_count, skipped_count, waiting_count, total_count):
 		captured['results'] = results
 		captured['success_count'] = success_count
 		captured['skipped_count'] = skipped_count
 		captured['waiting_count'] = waiting_count
 		captured['total_count'] = total_count
-		return '<html>ok</html>'
-
-	def fake_build_plain_text_notification(results, success_count, skipped_count, waiting_count, total_count):
-		assert success_count == 1
-		assert skipped_count == 1
-		assert waiting_count == 0
-		assert total_count == 2
 		return 'plain-text-ok'
 
 	with (
@@ -251,7 +366,7 @@ def test_main_combines_both_providers_and_respects_notify_policy():
 		patch('checkin.get_beijing_time', return_value='2026-03-29 00:00:00'),
 		patch('checkin.run_anyrouter_checkins', fake_run_anyrouter_checkins),
 		patch('checkin.run_agentrouter_checkins', fake_run_agentrouter_checkins),
-		patch('checkin.build_html_notification', side_effect=fake_build_html_notification),
+		patch('checkin.build_html_notification') as mock_build_html,
 		patch('checkin.build_plain_text_notification', side_effect=fake_build_plain_text_notification),
 		patch('checkin.load_notification_state', return_value={'date': '2026-03-29', 'notified_successes': []}),
 		patch('checkin.save_notification_state'),
@@ -269,6 +384,7 @@ def test_main_combines_both_providers_and_respects_notify_policy():
 	assert captured['results'][0]['provider'] == 'AnyRouter'
 	assert captured['results'][1]['provider'] == 'AgentRouter'
 	mock_should_send.assert_called_once_with(1, 1, 2)
+	mock_build_html.assert_not_called()
 	mock_push_message.assert_not_called()
 	mock_exit.assert_called_once_with(0)
 
@@ -339,7 +455,7 @@ def test_build_html_notification_uses_glass_fallback_and_responsive_layout():
 	assert '今日已签' in html
 
 
-def test_notify_once_shows_waiting_then_hides_previously_successful_provider():
+def test_notify_once_preserves_skipped_then_hides_previously_successful_provider():
 	agent_success = checkin.make_result(
 		success=True,
 		account_index=0,
@@ -362,7 +478,7 @@ def test_notify_once_shows_waiting_then_hides_previously_successful_provider():
 		notify_once=True,
 	)
 
-	assert [checkin.get_result_status(result) for result in first_results] == ['success', 'waiting']
+	assert [checkin.get_result_status(result) for result in first_results] == ['success', 'skipped']
 	assert first_successes == ['agent-key']
 	assert checkin.build_notification_title(first_results) == 'AgentRouter 签到成功'
 
@@ -393,6 +509,12 @@ def test_notify_once_shows_waiting_then_hides_previously_successful_provider():
 	assert second_results[0].get('provider') == 'AnyRouter'
 	assert second_successes == ['any-key']
 	assert checkin.build_notification_title(second_results) == 'AnyRouter 签到成功'
+
+
+def test_run_exit_code_fails_only_when_failures_exist_without_new_success():
+	assert checkin.get_run_exit_code(success_count=0, fail_count=1) == 1
+	assert checkin.get_run_exit_code(success_count=1, fail_count=1) == 0
+	assert checkin.get_run_exit_code(success_count=0, fail_count=0) == 0
 
 
 def assert_dotenv_accounts_are_loadable(env_path: Path) -> set[str]:

@@ -17,6 +17,7 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import Browser, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 from notify import notify
 
@@ -28,9 +29,12 @@ WAF_COOKIE_NAMES = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0
+MAX_RETRY_DELAY = 60.0
 AGENTROUTER_LOG_RETRIES = 5
 AGENTROUTER_LOG_RETRY_DELAY = 1.0
 AGENTROUTER_SYSTEM_LOG_TYPE = 4
+AGENTROUTER_FETCH_TIMEOUT_MS = int(DEFAULT_TIMEOUT * 1000)
+AGENTROUTER_FETCH_TIMEOUT_GRACE = 5.0
 NOTIFICATION_STATE_FILE = Path('.venv/.checkin_notify_state.json')
 WAITING_FOR_CHECKIN = '未到新的签到时机'
 WAITING_ERROR_MARKERS = ('未到签到', '未到时间', '尚未到', '签到尚未开放', '签到未开放', 'not yet time', 'too early')
@@ -184,6 +188,7 @@ def load_notification_state() -> NotificationState:
 def save_notification_state(state: NotificationState) -> None:
 	"""保存当天通知状态，供后续 Actions 运行恢复。"""
 	try:
+		NOTIFICATION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 		NOTIFICATION_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
 	except OSError as e:
 		print(f'[通知] 保存推送状态失败，本轮仍继续: {str(e)[:80]}')
@@ -219,11 +224,7 @@ def build_notification_results(
 			waiting_result['user_info'] = WAITING_FOR_CHECKIN
 			notification_results.append(waiting_result)
 		elif status == 'skipped' and account_key not in notified:
-			waiting_result = CheckinResult(**result)
-			waiting_result['status'] = 'waiting'
-			waiting_result['error'] = None
-			waiting_result['user_info'] = WAITING_FOR_CHECKIN
-			notification_results.append(waiting_result)
+			notification_results.append(result)
 
 	return notification_results, new_successes
 
@@ -561,7 +562,13 @@ async def retry_async(coro_func, max_retries: int = MAX_RETRIES, base_delay: flo
 		except httpx.HTTPError as e:
 			last_exception = e
 			if attempt < max_retries - 1:
-				delay = base_delay * (2**attempt)
+				delay = min(base_delay * (2**attempt), MAX_RETRY_DELAY)
+				if isinstance(e, httpx.HTTPStatusError):
+					retry_after = e.response.headers.get('Retry-After', '').strip()
+					try:
+						delay = min(max(delay, float(retry_after)), MAX_RETRY_DELAY)
+					except ValueError:
+						pass
 				print(f'[重试] 第 {attempt + 1} 次失败，{delay}秒后重试...')
 				await asyncio.sleep(delay)
 	if last_exception is not None:
@@ -593,6 +600,24 @@ def load_account_config(env_name: str, provider: str, required_fields: tuple[str
 		missing_fields = [field for field in required_fields if not account.get(field)]
 		if missing_fields:
 			print(f'[错误] {provider} 账号 {index} 缺少必需字段: {", ".join(missing_fields)}')
+			return None
+		invalid_fields: list[str] = []
+		for field in required_fields:
+			value = account.get(field)
+			if field == 'cookies':
+				if not isinstance(value, (str, dict)):
+					invalid_fields.append(field)
+				elif isinstance(value, dict) and not all(
+					isinstance(key, str) and isinstance(cookie_value, str) for key, cookie_value in value.items()
+				):
+					invalid_fields.append(field)
+			elif not isinstance(value, str):
+				invalid_fields.append(field)
+		if invalid_fields:
+			print(f'[错误] {provider} 账号 {index} 字段类型无效: {", ".join(invalid_fields)}')
+			return None
+		if 'name' in account and not isinstance(account['name'], str):
+			print(f'[错误] {provider} 账号 {index} name 类型无效（必须是字符串）')
 			return None
 
 	return accounts_data
@@ -630,6 +655,38 @@ def parse_cookies(cookies_data):
 	return {}
 
 
+def describe_http_response(response: httpx.Response) -> str:
+	"""生成不包含响应正文的 HTTP 诊断摘要。"""
+	content_type = response.headers.get('content-type', '未知')
+	content_encoding = response.headers.get('content-encoding', 'identity')
+	try:
+		response_url = str(response.url)
+	except RuntimeError:
+		response_url = '未知'
+	return (
+		f'HTTP {response.status_code}, Content-Type {content_type}, Content-Encoding {content_encoding}, '
+		f'{len(response.content)} bytes, URL {response_url}'
+	)
+
+
+def parse_anyrouter_json(response: httpx.Response, endpoint: str) -> dict[str, Any]:
+	"""解析 AnyRouter JSON，并区分 WAF/网关 HTML 与普通格式错误。"""
+	try:
+		payload = response.json()
+	except json.JSONDecodeError as e:
+		content_type = response.headers.get('content-type', '').lower()
+		body_prefix = response.text.lstrip()[:120].lower()
+		response_kind = (
+			'WAF/网关 HTML'
+			if 'html' in content_type or body_prefix.startswith(('<!doctype html', '<html'))
+			else '非 JSON'
+		)
+		raise RuntimeError(f'{endpoint} 返回{response_kind} ({describe_http_response(response)})') from e
+	if not isinstance(payload, dict):
+		raise RuntimeError(f'{endpoint} 返回的 JSON 不是对象 ({describe_http_response(response)})')
+	return payload
+
+
 async def precheck_account(account_info: AccountConfig, account_index: int) -> tuple[bool, str | None]:
 	"""预检账号状态：验证 session 有效性，无需 WAF cookies。
 	返回 (session_valid, error_msg)"""
@@ -650,12 +707,15 @@ async def precheck_account(account_info: AccountConfig, account_index: int) -> t
 				print(f'[预检] {account_name}: session 已过期 (HTTP 401)，请更新 cookies')
 				return False, 'session 已过期 (HTTP 401)，请更新 cookies'
 			if response.status_code == 200:
-				data = response.json()
+				data = parse_anyrouter_json(response, '/api/user/self')
 				if data.get('success'):
 					print(f'[预检] {account_name}: session 有效')
 					return True, None
 				return False, data.get('message', '未知错误')
 			return False, f'HTTP {response.status_code}'
+	except RuntimeError as e:
+		print(f'[预检] {account_name}: {str(e)[:160]}，继续获取 WAF cookies')
+		return True, None
 	except Exception as e:
 		print(f'[预检] {account_name}: 预检请求失败 - {str(e)[:50]}')
 		# 预检失败不阻断，仍尝试后续流程
@@ -780,7 +840,7 @@ async def get_user_info(
 		response = await client.get(f'{ANYROUTER_BASE_URL}/api/user/self', headers=headers, timeout=DEFAULT_TIMEOUT)
 
 		if response.status_code == 200:
-			data = response.json()
+			data = parse_anyrouter_json(response, '/api/user/self')
 			if data.get('success'):
 				user_data = data.get('data', {})
 				quota = round(user_data.get('quota', 0) / QUOTA_PER_UNIT, 2)
@@ -799,7 +859,7 @@ def build_headers(api_user: str) -> dict[str, str]:
 		'User-Agent': DEFAULT_USER_AGENT,
 		'Accept': 'application/json, text/plain, */*',
 		'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-		'Accept-Encoding': 'gzip, deflate, br, zstd',
+		'Accept-Encoding': 'gzip, deflate',
 		'Referer': f'{ANYROUTER_BASE_URL}/console',
 		'Origin': ANYROUTER_BASE_URL,
 		'Connection': 'keep-alive',
@@ -818,9 +878,12 @@ async def do_checkin_request(
 	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
 
 	async def _request():
-		return await client.post(
+		response = await client.post(
 			f'{ANYROUTER_BASE_URL}/api/user/sign_in', headers=checkin_headers, timeout=DEFAULT_TIMEOUT
 		)
+		if response.status_code == 429 or response.status_code >= 500:
+			response.raise_for_status()
+		return response
 
 	try:
 		response = await retry_async(_request)
@@ -828,16 +891,17 @@ async def do_checkin_request(
 
 		if response.status_code == 200:
 			try:
-				result = response.json()
+				result = parse_anyrouter_json(response, '/api/user/sign_in')
 				if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
 					return True, None
 				else:
 					error_msg = result.get('msg', result.get('message', '未知错误'))
 					return False, error_msg
-			except json.JSONDecodeError:
-				if 'success' in response.text.lower():
+			except RuntimeError as e:
+				content_type = response.headers.get('content-type', '').lower()
+				if 'text/plain' in content_type and response.text.strip().lower() in {'success', 'ok'}:
 					return True, None
-				return False, '响应格式无效'
+				return False, str(e)
 		else:
 			if response.status_code == 401:
 				return False, 'session 已过期 (HTTP 401)，请更新 cookies'
@@ -1004,28 +1068,63 @@ async def agentrouter_browser_fetch(
 ) -> BrowserFetchResponse:
 	"""在浏览器同源上下文中请求 AgentRouter API，继承 WAF 与会话 Cookie。"""
 	for attempt in range(MAX_RETRIES):
-		result = cast(
-			BrowserFetchResponse,
-			await page.evaluate(
-				"""async ({ endpoint, method, body, headers }) => {
-					const requestHeaders = { Accept: 'application/json', ...(headers || {}) };
-					if (body) requestHeaders['Content-Type'] = 'application/json';
-					const response = await fetch(endpoint, {
-						method,
-						headers: requestHeaders,
-						credentials: 'include',
-						body: body ? JSON.stringify(body) : undefined,
-					});
-					return {
-						status: response.status,
-						content_type: response.headers.get('content-type') || '',
-						text: await response.text(),
-						url: response.url,
-					};
-				}""",
-				{'endpoint': endpoint, 'method': method, 'body': body, 'headers': headers or {}},
-			),
-		)
+		try:
+			result = cast(
+				BrowserFetchResponse,
+				await asyncio.wait_for(
+					page.evaluate(
+						"""async ({ endpoint, method, body, headers, timeout_ms }) => {
+							const controller = new AbortController();
+							const timeoutId = setTimeout(() => controller.abort(), timeout_ms);
+							try {
+								const requestHeaders = { Accept: 'application/json', ...(headers || {}) };
+								if (body) requestHeaders['Content-Type'] = 'application/json';
+								const response = await fetch(endpoint, {
+									method,
+									headers: requestHeaders,
+									credentials: 'include',
+									body: body ? JSON.stringify(body) : undefined,
+									signal: controller.signal,
+								});
+								return {
+									status: response.status,
+									content_type: response.headers.get('content-type') || '',
+									text: await response.text(),
+									url: response.url,
+								};
+							} catch (error) {
+								if (error && error.name === 'AbortError') {
+									throw new Error(`AgentRouter fetch timeout after ${timeout_ms}ms`);
+								}
+								throw error;
+							} finally {
+								clearTimeout(timeoutId);
+							}
+						}""",
+						{
+							'endpoint': endpoint,
+							'method': method,
+							'body': body,
+							'headers': headers or {},
+							'timeout_ms': AGENTROUTER_FETCH_TIMEOUT_MS,
+						},
+					),
+					timeout=AGENTROUTER_FETCH_TIMEOUT_MS / 1000 + AGENTROUTER_FETCH_TIMEOUT_GRACE,
+				),
+			)
+		except (TimeoutError, PlaywrightError) as e:
+			is_timeout = isinstance(e, TimeoutError) or 'AgentRouter fetch timeout' in str(e)
+			if attempt == MAX_RETRIES - 1:
+				if is_timeout:
+					raise RuntimeError(
+						f'AgentRouter 请求超时: {endpoint} ({AGENTROUTER_FETCH_TIMEOUT_MS / 1000:g} 秒)'
+					) from e
+				raise RuntimeError(f'AgentRouter 浏览器请求失败: {endpoint} - {str(e)[:100]}') from e
+			delay = RETRY_BASE_DELAY * (2**attempt)
+			reason = '请求超时' if is_timeout else '浏览器请求失败'
+			print(f'[重试] AgentRouter: {endpoint} {reason}，{delay} 秒后重试')
+			await asyncio.sleep(delay)
+			continue
 		if 'html' not in result['content_type'].lower() or attempt == MAX_RETRIES - 1:
 			return result
 		delay = RETRY_BASE_DELAY * (2**attempt)
@@ -1374,6 +1473,11 @@ def count_results(results: list[CheckinResult | BaseException]) -> tuple[int, in
 	return statuses.count('success'), statuses.count('skipped'), statuses.count('waiting')
 
 
+def get_run_exit_code(success_count: int, fail_count: int) -> int:
+	"""有新成功时允许部分失败；无新成功且存在失败时令工作流失败。"""
+	return 0 if success_count > 0 or fail_count == 0 else 1
+
+
 async def main():
 	"""运行 AnyRouter + AgentRouter 统一自动签到。"""
 	load_dotenv()
@@ -1427,7 +1531,7 @@ async def main():
 	save_notification_state(state)
 
 	print(f'[汇总] 成功 {success_count}，已签 {skipped_count}，失败 {fail_count}')
-	sys.exit(0 if success_count + skipped_count + waiting_count > 0 else 1)
+	sys.exit(get_run_exit_code(success_count, fail_count))
 
 
 def run_main():

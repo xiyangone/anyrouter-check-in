@@ -179,7 +179,7 @@ AgentRouter（`https://agentrouter.org/`）直接配置登录邮箱和密码，�
 
 - AnyRouter 请确保 cookies 与 API User 正确；AgentRouter 请确保邮箱与密码正确
 - 可以在 Actions 页面查看详细的运行日志
-- 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
+- 支持部分账号失败：只要本轮至少有一个账号新签到成功，整个任务就不会失败；若本轮没有新成功且仍有失败账号，Actions 会返回失败；全部为“今日已签”或等待状态且没有失败时正常结束
 - `WAF_CACHE_TTL` 默认为 2 小时；在 GitHub 托管 Runner 中，`.waf_cache.json` 通常不会跨定时任务保留，因此主要收益是单次任务内复用，不影响功能正确性
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
@@ -198,7 +198,7 @@ AgentRouter（`https://agentrouter.org/`）直接配置登录邮箱和密码，�
 | `false` | 默认，每轮执行都完整推送所有账号结果，便于观察 |
 | `true` | 成功结果按账号每天只推送一次；失败始终推送；已成功账号不在后续邮件重复出现 |
 
-`NOTIFY_ONCE=true` 时，如果本轮某个平台刚签到成功，邮件会显示这个成功结果；其他尚未产生新签到奖励、且当天还没有成功推送记录的账号会标记为「未到时间」。后续另一个平台签到成功时，前面已经成功过的平台不会再次显示。GitHub Actions 会用北京时间日期缓存当天状态，第二天自动重新开始记录。
+`NOTIFY_ONCE=true` 时，如果本轮某个平台刚签到成功，邮件会显示这个成功结果；当天已经签到但尚未记录成功通知的账号保持显示为「今日已签」，只有站点明确返回尚未开放签到时才显示「未到时间」。后续另一个平台签到成功时，前面已经成功推送过的平台不会再次显示。GitHub Actions 会用北京时间日期缓存当天状态，第二天自动重新开始记录。
 
 - 已移除 `PushPlus`。根据其官方文档，自 2024-08-01 起发送消息需完成实名认证，且实名认证会产生服务费，或通过付费会员完成，不再适合作为本项目默认低门槛通道。
 - `息知` 仅支持文本消息。
@@ -255,6 +255,7 @@ AgentRouter（`https://agentrouter.org/`）直接配置登录邮箱和密码，�
 | -------------------- | ------------------- | ---------------------- |
 | 401 Unauthorized     | cookies 过期或无效  | 重新获取 session 值    |
 | WAF cookies 获取失败 | Cloudflare 验证问题 | 脚本会自动重试 3 次    |
+| HTTP 200 但返回 WAF/网关 HTML | WAF Cookie 未生效或网关仍在拦截 | 查看日志中的 Content-Type、Content-Encoding 与 URL 诊断，刷新 cookies 后重试 |
 | 今日已签到           | 24 小时内已签到过   | 无需处理，等待下次执行 |
 | 未找到签到到账日志   | AgentRouter 登录成功但系统日志没有实际到账记录 | 以系统日志为准，避免误报成功 |
 
